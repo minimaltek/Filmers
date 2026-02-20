@@ -6,7 +6,9 @@ Synchronize multiple iPhones to capture the same moment — then cut between ang
 
 Screenshots
 
-<img width="960" height="2079" alt="IMG_3689" src="https://github.com/user-attachments/assets/ece2e494-0cf8-4421-99b4-d6dec952a40f" />
+<p align="center">
+  <img width="350" src="https://github.com/user-attachments/assets/ece2e494-0cf8-4421-99b4-d6dec952a40f" />
+</p>
 
 
 Status
