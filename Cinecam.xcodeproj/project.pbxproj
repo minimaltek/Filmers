@@ -10,10 +10,28 @@
 		E28EADA92F42E8E1007131DF /* Cinecam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cinecam.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		E28EADC42F42FB6A007131DF /* Exceptions for "Cinecam" folder in "Cinecam" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E28EADA82F42E8E1007131DF /* Cinecam */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		E28EADAB2F42E8E1007131DF /* Cinecam */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E28EADC42F42FB6A007131DF /* Exceptions for "Cinecam" folder in "Cinecam" target */,
+			);
 			path = Cinecam;
+			sourceTree = "<group>";
+		};
+		E28EADC02F42F7CD007131DF /* Docs */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Docs;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,6 +50,7 @@
 		E28EADA02F42E8E1007131DF = {
 			isa = PBXGroup;
 			children = (
+				E28EADC02F42F7CD007131DF /* Docs */,
 				E28EADAB2F42E8E1007131DF /* Cinecam */,
 				E28EADAA2F42E8E1007131DF /* Products */,
 			);
@@ -62,6 +81,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				E28EADAB2F42E8E1007131DF /* Cinecam */,
+				E28EADC02F42F7CD007131DF /* Docs */,
 			);
 			name = Cinecam;
 			packageProductDependencies = (
@@ -256,11 +276,18 @@
 				DEVELOPMENT_TEAM = 4YRYH5BD9B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Cinecam/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "動画を撮影するためにカメラを使用します";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "他のデバイスと同期するためにローカルネットワークを使用します";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声を録音するためにマイクを使用します";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "撮影した動画をカメラロールに保存します";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "撮影した動画をカメラロールから確認するために使用します";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -288,11 +315,18 @@
 				DEVELOPMENT_TEAM = 4YRYH5BD9B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Cinecam/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "動画を撮影するためにカメラを使用します";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "他のデバイスと同期するためにローカルネットワークを使用します";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声を録音するためにマイクを使用します";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "撮影した動画をカメラロールに保存します";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "撮影した動画をカメラロールから確認するために使用します";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
