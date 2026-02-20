@@ -1,8 +1,8 @@
 # CineCam
 
-<p align="right">
-  <img width="180" src="https://github.com/user-attachments/assets/0a587207-9581-a30e-a37c-e453" />
-  <img width="180" src="https://github.com/user-attachments/assets/c6347207-b8a3-7faf-e634-2d83" />
+
+  <img width="180" src="https://github.com/user-attachments/assets/45ea456f-ed48-477f-bf5e-a0e1f2258d9a" />
+  <img width="180" src="https://github.com/user-attachments/assets/86c994b4-a16c-4274-8b42-ced356dff4a1" />
   <img width="180" src="https://github.com/user-attachments/assets/ece2e494-0cf8-4421-99b4-d6dec952a40f" />
 </p>
 
@@ -35,8 +35,8 @@ and export it as one cinematic video.
 ## Screenshots
 
 <p align="center">
-  <img width="300" src="https://github.com/user-attachments/assets/0a587207-9581-a30e-a37c-e453" />
-  <img width="300" src="https://github.com/user-attachments/assets/c6347207-b8a3-7faf-e634-2d83" />
+  <img width="300" src="https://github.com/user-attachments/assets/45ea456f-ed48-477f-bf5e-a0e1f2258d9a" />
+  <img width="300" src="https://github.com/user-attachments/assets/86c994b4-a16c-4274-8b42-ced356dff4a1" />
   <img width="300" src="https://github.com/user-attachments/assets/ece2e494-0cf8-4421-99b4-d6dec952a40f" />
 </p>
 
