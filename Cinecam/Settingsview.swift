@@ -14,7 +14,7 @@ struct SettingsView: View {
 
     @State private var selectedResolution: VideoResolution = .hd1080p
     @State private var selectedFrameRate: FrameRate = .fps30
-    @State private var selectedOrientation: VideoOrientation = .landscape
+    @State private var selectedOrientation: VideoOrientation = .cinema
     @State private var selectedCodec: VideoCodec = .hevc
 
     /// UserDefaults に永続化するユーザー名
@@ -26,18 +26,16 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationView {
-            ZStack {
-                Color.black.ignoresSafeArea()
-
-                Form {
-                    // ── ユーザー名設定 ──────────────────────────────
+            Form {
+                    // ── User Name ──────────────────────────────
                     Section {
                         HStack {
-                            TextField("ユーザー名", text: $userNameDraft)
+                            TextField("User Name", text: $userNameDraft)
+                                .foregroundColor(.white)
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                             if userNameDraft != userName {
-                                Button("保存") {
+                                Button("Save") {
                                     let trimmed = userNameDraft.trimmingCharacters(in: .whitespaces)
                                     guard !trimmed.isEmpty else { return }
                                     userName = trimmed
@@ -47,82 +45,91 @@ struct SettingsView: View {
                                 .tint(.cyan)
                             }
                         }
+                        .listRowBackground(Color.white.opacity(0.08))
                     } header: {
-                        Text("ユーザー名")
+                        Text("User Name")
                     } footer: {
-                        Text("他のデバイスのタイムラインでこの名前で表示されます。変更後はアプリを再起動してください。")
+                        Text("This name will be shown on other devices' timelines. Restart the app after changing.")
                             .font(.caption)
                     }
 
-                    // ── 録画設定 ────────────────────────────────────
+                    // ── Recording Settings ────────────────────────────────────
                     Section {
-                        Picker("解像度", selection: $selectedResolution) {
+                        Picker("Resolution", selection: $selectedResolution) {
                             Text("720p HD").tag(VideoResolution.hd720p)
                             Text("1080p Full HD").tag(VideoResolution.hd1080p)
                             Text("4K").tag(VideoResolution.uhd4k)
                         }
                         .pickerStyle(.menu)
+                        .listRowBackground(Color.white.opacity(0.08))
 
-                        Picker("フレームレート", selection: $selectedFrameRate) {
+                        Picker("Frame Rate", selection: $selectedFrameRate) {
                             Text("30 fps").tag(FrameRate.fps30)
                             Text("60 fps").tag(FrameRate.fps60)
                         }
                         .pickerStyle(.menu)
+                        .listRowBackground(Color.white.opacity(0.08))
 
-                        Picker("画面の向き", selection: $selectedOrientation) {
-                            Text("横向き").tag(VideoOrientation.landscape)
-                            Text("縦向き").tag(VideoOrientation.portrait)
+                        Picker("Aspect Ratio", selection: $selectedOrientation) {
+                            Text("Landscape - Cinema (2.39:1)").tag(VideoOrientation.cinema)
+                            Text("Landscape - TV (16:9)").tag(VideoOrientation.landscape)
+                            Text("Portrait - Phone (9:16)").tag(VideoOrientation.portrait)
                         }
                         .pickerStyle(.menu)
+                        .listRowBackground(Color.white.opacity(0.08))
                         
-                        Picker("ビデオコーデック", selection: $selectedCodec) {
-                            Text("H.264 (標準)").tag(VideoCodec.h264)
-                            Text("HEVC (高品質)").tag(VideoCodec.hevc)
-                            Text("ProRes 422 (プロ向け)").tag(VideoCodec.proRes422)
-                            Text("ProRes 4444 (最高品質)").tag(VideoCodec.proRes4444)
+                        Picker("Video Codec", selection: $selectedCodec) {
+                            Text("H.264 (Standard)").tag(VideoCodec.h264)
+                            Text("HEVC (High Quality)").tag(VideoCodec.hevc)
+                            Text("ProRes 422 (Professional)").tag(VideoCodec.proRes422)
+                            Text("ProRes 4444 (Highest Quality)").tag(VideoCodec.proRes4444)
                         }
                         .pickerStyle(.menu)
+                        .listRowBackground(Color.white.opacity(0.08))
                     } header: {
-                        Text("録画設定")
+                        Text("Recording Settings")
                     } footer: {
                         Text(selectedCodec.description)
                             .font(.caption)
                     }
-
-                    Section {
-                        Button("設定を適用") {
-                            applySettings()
-                            dismiss()
-                        }
-                    }
                 }
-            }
-            .navigationTitle("設定")
+                .scrollContentBackground(.hidden)
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Color.black, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(action: { dismiss() }) {
                         Image(systemName: "xmark")
                             .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
                     }
                 }
             }
             .onAppear {
                 userNameDraft = userName
+                selectedOrientation = cameraManager.desiredOrientation
+                selectedCodec = VideoCodec.from(avCodec: cameraManager.videoCodec)
             }
-            .alert("再起動が必要です", isPresented: $showRestartAlert) {
+            .onDisappear {
+                applySettings()
+            }
+            .alert("Restart Required", isPresented: $showRestartAlert) {
                 Button("OK") { }
             } message: {
-                Text("ユーザー名「\(userName)」を保存しました。次回アプリ起動時から反映されます。")
+                Text("User name \"\(userName)\" has been saved. It will take effect on the next app launch.")
             }
         }
+        .preferredColorScheme(.dark)
     }
 
     private func applySettings() {
         cameraManager.desiredOrientation = selectedOrientation
         cameraManager.videoOrientation = selectedOrientation.avOrientation
         cameraManager.videoCodec = selectedCodec.avCodec
-        print("📹 設定変更: 向き=\(selectedOrientation.rawValue), コーデック=\(selectedCodec.rawValue)")
+        print("📹 Settings changed: orientation=\(selectedOrientation.rawValue), codec=\(selectedCodec.rawValue)")
     }
 }
 
@@ -146,13 +153,41 @@ enum FrameRate: Int {
 }
 
 enum VideoOrientation: String, Codable {
-    case landscape = "横向き"
-    case portrait = "縦向き"
+    case cinema   = "横（シネマ）"    // 2.39:1
+    case landscape = "横（テレビ）"   // 16:9  ← 旧 "横向き" との後方互換
+    case portrait  = "縦（スマホ）"   // 9:16  ← 旧 "縦向き" との後方互換
+
+    /// クロップ時のアスペクト比
+    var aspectRatio: CGFloat {
+        switch self {
+        case .cinema:    return 2.39
+        case .landscape: return 16.0 / 9.0
+        case .portrait:  return 9.0 / 16.0
+        }
+    }
     
+    /// 横向き系か（端末が縦持ちの場合にクロップが必要）
+    var isLandscape: Bool {
+        switch self {
+        case .cinema, .landscape: return true
+        case .portrait:           return false
+        }
+    }
+
     var avOrientation: AVCaptureVideoOrientation {
         switch self {
-        case .landscape: return .landscapeRight
-        case .portrait: return .portrait
+        case .cinema, .landscape: return .landscapeRight
+        case .portrait:           return .portrait
+        }
+    }
+
+    /// 旧rawValue（"横向き"/"縦向き"）からのデコード互換
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "横向き":  self = .landscape
+        case "縦向き":  self = .portrait
+        default:       self = VideoOrientation(rawValue: raw) ?? .cinema
         }
     }
 }
@@ -170,17 +205,27 @@ enum VideoCodec: String {
         case .proRes4444: return .proRes4444
         }
     }
+
+    static func from(avCodec: AVVideoCodecType) -> VideoCodec {
+        switch avCodec {
+        case .h264:       return .h264
+        case .hevc:       return .hevc
+        case .proRes422:  return .proRes422
+        case .proRes4444: return .proRes4444
+        default:          return .hevc
+        }
+    }
     
     var description: String {
         switch self {
         case .h264:
-            return "標準的なコーデック。ファイルサイズと品質のバランスが良い。"
+            return "Standard codec. Good balance of file size and quality."
         case .hevc:
-            return "H.264より高品質・高圧縮。ファイルサイズが小さく、4K撮影に最適。"
+            return "Higher quality & compression than H.264. Smaller files, ideal for 4K."
         case .proRes422:
-            return "プロ向けコーデック。編集に最適だが、ファイルサイズが非常に大きい。"
+            return "Professional codec. Best for editing, but very large file size."
         case .proRes4444:
-            return "最高品質のProRes。アルファチャンネル対応。ファイルサイズが最大。"
+            return "Highest quality ProRes. Alpha channel support. Largest file size."
         }
     }
 }

@@ -117,18 +117,28 @@ enum CameraHelper {
         }
     }
     
-    /// 利用可能なバックカメラを取得
+    /// 利用可能なバックカメラをズームラベルで重複排除して取得
+    /// 同じラベル（例: "1×"）を持つ複数デバイスのうち最初の1台だけを返す
+    static func uniqueBackCameras() -> [AVCaptureDevice] {
+        var seen = Set<String>()
+        return availableBackCameras().filter { camera in
+            let label = zoomLabel(for: camera.deviceType)
+            if seen.contains(label) { return false }
+            seen.insert(label)
+            return true
+        }
+    }
+    
+    /// 利用可能なバックカメラを取得（個別の物理カメラのみ）
     static func availableBackCameras() -> [AVCaptureDevice] {
         if PreviewDetection.isRunningForPreviews { return [] }
         
+        // 個別の物理カメラのみ取得（マルチカメラ仮想デバイスは除外）
         let discoverySession = AVCaptureDevice.DiscoverySession(
             deviceTypes: [
                 .builtInUltraWideCamera,
                 .builtInWideAngleCamera,
-                .builtInTelephotoCamera,
-                .builtInTripleCamera,
-                .builtInDualCamera,
-                .builtInDualWideCamera
+                .builtInTelephotoCamera
             ],
             mediaType: .video,
             position: .back

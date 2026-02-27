@@ -31,11 +31,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             default:                       return .portrait
             }
         }
-        // カメラ起動中は縦固定
-        if OrientationLock.isCameraActive {
-            return .portrait
-        }
-        // 通常時は全向きを許可
+        // カメラ起動中も回転を許可（プレビューが端末の向きに追従する）
+        // 通常時・カメラ起動中ともに全向きを許可
         return .allButUpsideDown
     }
 }

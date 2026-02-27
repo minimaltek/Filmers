@@ -86,7 +86,7 @@ final class ExclusiveEditTimeline: ObservableObject {
               let range = videoRangeByDevice[device] else { return }
         segs[idx].trimIn = max(segs[idx].videoStart, min(segs[idx].trimOut - 0.1, newTrimIn))
         segmentsByDevice[device] = mergeAdjacentSegments(segs, range: range)
-        enforceExclusivity()
+        enforceExclusivity(priorityDevice: device)
     }
 
     func moveTrimOut(segmentID: UUID, device: String, newTrimOut: Double) {
@@ -95,7 +95,7 @@ final class ExclusiveEditTimeline: ObservableObject {
               let range = videoRangeByDevice[device] else { return }
         segs[idx].trimOut = min(segs[idx].videoEnd, max(segs[idx].trimIn + 0.1, newTrimOut))
         segmentsByDevice[device] = mergeAdjacentSegments(segs, range: range)
-        enforceExclusivity()
+        enforceExclusivity(priorityDevice: device)
     }
 
     func moveSegment(segmentID: UUID, device: String, deltaSeconds: Double) {
@@ -106,7 +106,7 @@ final class ExclusiveEditTimeline: ObservableObject {
         let newIn = max(segs[idx].videoStart, min(segs[idx].videoEnd - span, segs[idx].trimIn + deltaSeconds))
         segs[idx].trimIn = newIn; segs[idx].trimOut = newIn + span
         segmentsByDevice[device] = mergeAdjacentSegments(segs, range: range)
-        enforceExclusivity()
+        enforceExclusivity(priorityDevice: device)
     }
 
     /// 指定タイムライン位置を中心に、そのデバイスの映像範囲内に新しい小さなセグメントを追加する。
@@ -144,8 +144,8 @@ final class ExclusiveEditTimeline: ObservableObject {
         let merged = mergeAdjacentSegments(existing + [newSeg], range: range)
         segmentsByDevice[device] = merged
 
-        // 全デバイス間で排他制約を強制適用（他デバイスの重複も確実に除去）
-        enforceExclusivity()
+        // 全デバイス間で排他制約を強制適用（操作中デバイスを最優先）
+        enforceExclusivity(priorityDevice: device)
     }
 
     /// trimIn/trimOut が接触・重複しているセグメントを1つに結合する。
@@ -212,14 +212,22 @@ final class ExclusiveEditTimeline: ObservableObject {
     }
 
     /// 全デバイス間で時間軸の排他制約を強制適用する。
-    /// デバイスの優先順位は `devices` 配列の順（先頭が最優先）。
-    /// セグメント追加・移動後に呼ぶことで常に排他状態を保証する。
-    func enforceExclusivity() {
+    /// `priorityDevice` が指定された場合、そのデバイスを最優先で処理し、
+    /// 他デバイスのセグメントをトリムする。未指定時は `devices` 配列順。
+    func enforceExclusivity(priorityDevice: String? = nil) {
+        // 優先デバイスを先頭にした処理順を構築
+        let ordered: [String]
+        if let priority = priorityDevice, devices.contains(priority) {
+            ordered = [priority] + devices.filter { $0 != priority }
+        } else {
+            ordered = devices
+        }
+
         // 優先順位順に処理：先に処理されたデバイスのセグメントが勝つ
         var committed: [(trimIn: Double, trimOut: Double)] = []
         var result: [String: [ClipSegment]] = [:]
 
-        for device in devices {
+        for device in ordered {
             let segs = (segmentsByDevice[device] ?? []).filter { $0.isValid }
             // 既に確定済みの範囲を全て除去
             var remaining = segs
@@ -235,6 +243,13 @@ final class ExclusiveEditTimeline: ObservableObject {
             result[device] = remaining
         }
         segmentsByDevice = result
+    }
+
+    /// セグメントを削除する（ダブルタップで呼ばれる）
+    func removeSegment(segmentID: UUID, device: String) {
+        guard var segs = segmentsByDevice[device] else { return }
+        segs.removeAll { $0.id == segmentID }
+        segmentsByDevice[device] = segs
     }
 
     func activeDevice(at seconds: Double) -> String? {

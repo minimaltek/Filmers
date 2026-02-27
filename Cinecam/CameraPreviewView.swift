@@ -10,10 +10,22 @@ import AVFoundation
 
 struct CameraPreviewView: UIViewRepresentable {
     let previewLayer: AVCaptureVideoPreviewLayer
+    /// 端末回転時にプレビュー・録画のorientationを更新するためのCameraManager参照
+    var cameraManager: CameraManager?
 
     func makeUIView(context: Context) -> PreviewUIView {
         let view = PreviewUIView(previewLayer: previewLayer)
         view.backgroundColor = .black
+        view.cameraManager = cameraManager
+        // 端末回転の通知を監視
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.orientationDidChange(_:)),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
+        context.coordinator.view = view
+        context.coordinator.cameraManager = cameraManager
         return view
     }
 
@@ -22,6 +34,8 @@ struct CameraPreviewView: UIViewRepresentable {
         if uiView.previewLayer !== previewLayer {
             uiView.updatePreviewLayer(previewLayer)
         }
+        uiView.cameraManager = cameraManager
+        context.coordinator.cameraManager = cameraManager
         
         // フレームを即座に更新
         if uiView.bounds != .zero {
@@ -34,11 +48,24 @@ struct CameraPreviewView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    class Coordinator: NSObject {}
+    class Coordinator: NSObject {
+        weak var view: PreviewUIView?
+        weak var cameraManager: CameraManager?
+        
+        @objc func orientationDidChange(_ notification: Notification) {
+            // 端末の向きが変わったら、プレビュー・録画接続のorientationを更新
+            cameraManager?.updateOrientationForConnections()
+        }
+        
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+    }
     
     // カスタムUIView
     class PreviewUIView: UIView {
         private(set) var previewLayer: AVCaptureVideoPreviewLayer
+        weak var cameraManager: CameraManager?
         
         init(previewLayer: AVCaptureVideoPreviewLayer) {
             self.previewLayer = previewLayer

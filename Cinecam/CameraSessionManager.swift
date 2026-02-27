@@ -387,7 +387,14 @@ class CameraSessionManager: NSObject, ObservableObject {
             addLog("Preview closed – slave returning to await")
         }
         
-        // ★ 接続は維持
+        // ★ 接続は維持（ただし、プレビュー中にピアが全員切断していた場合は disconnected にする）
+        if connectedPeers.isEmpty {
+            connectionState = .disconnected
+            isWaitingForCameraReady = false
+            cameraReadyPeers.removeAll()
+            addLog("No peers remaining – returning to search")
+        }
+        
         print("📹 [SessionManager] Cleaned up after preview – connection maintained")
         
         return wasMaster
@@ -1134,8 +1141,6 @@ extension CameraSessionManager: MCSessionDelegate {
 
                 if self.connectedPeers.isEmpty && !isActive {
                     self.connectionState = .disconnected
-                    // ★ 接続が切れてもマスター/スレーブの役割は保持
-                    // （再接続時に役割を維持するため）
                     self.sessionID = ""
                     
                     // カメラ起動状態をリセット
@@ -1143,7 +1148,14 @@ extension CameraSessionManager: MCSessionDelegate {
                     self.isCameraReady = false
                     self.cameraReadyPeers.removeAll()
                     
-                    self.addLog("Disconnected – maintaining role, will retry connection")
+                    // ★ マスターが切断された場合、スレーブの役割をリセット
+                    // → SEARCHING状態に戻す（AWAIT緑のまま残らないようにする）
+                    if !self.isMaster && self.masterPeerID != nil {
+                        self.masterPeerID = nil
+                        self.addLog("Master disconnected – returning to search")
+                    } else {
+                        self.addLog("Disconnected – will retry connection")
+                    }
                 } else {
                     // まだ他のピアが接続されている、または録画中
                     self.addLog("Still have \(self.connectedPeers.count) peer(s) connected")

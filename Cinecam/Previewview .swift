@@ -29,6 +29,8 @@ final class PlaybackController: ObservableObject {
     private var blackUntil: Double = 0
     /// totalDuration キャッシュ（tick 内で参照）
     var totalDuration: Double = 0
+    /// 次セグメントの事前seek済み情報（device, segmentID）
+    private var preloadedNext: (device: String, segID: UUID)? = nil
 
     func setup(videos: [String: URL]) {
         players = videos.mapValues { AVPlayer(url: $0) }
@@ -36,6 +38,7 @@ final class PlaybackController: ObservableObject {
 
     func teardown() {
         seekGeneration += 1   // 残留シークコールバックを無効化
+        preloadedNext = nil
         players.values.forEach { $0.pause() }
         stopTimer()
     }
@@ -91,16 +94,24 @@ final class PlaybackController: ObservableObject {
         activePreviewDevice = device
         playheadTime = seg.trimIn
         blackUntil = 0
+
+        let player = players[device]
+
+        // 事前seekが完了していれば、seekをスキップして即再生
+        if let preloaded = preloadedNext,
+           preloaded.device == device,
+           preloaded.segID == seg.id {
+            preloadedNext = nil
+            isSeeking = false
+            if isPlaying { player?.play() }
+            return
+        }
+        preloadedNext = nil
+
         isSeeking = true
         seekGeneration += 1
         let generation = seekGeneration
-        let player = players[device]
 
-        // 再生中のデバイス切り替えシーク：toleranceBefore に小さな余裕を持たせることで
-        // AVFoundation が最寄りのキーフレームからすばやくデコードできる。
-        // toleranceBefore: .zero（フレーム精度）だとキーフレームから全フレームデコードが
-        // 必要になり数百ms の遅延が生じ、プレイヘッドが「止まって見える」原因になる。
-        // セグメント先頭への切り替えではフレーム精度は不要なので、2フレーム分の許容値を使う。
         let twoFrames = CMTimeMakeWithSeconds(2.0 / 30.0, preferredTimescale: 600)
         player?.seek(
             to: CMTimeMakeWithSeconds(seg.sourceInTime, preferredTimescale: 600),
@@ -224,6 +235,7 @@ final class PlaybackController: ObservableObject {
             isPlaying = false
             isSeeking = false
             seekGeneration += 1          // 進行中のシークコールバックを無効化
+            preloadedNext = nil
             players.values.forEach { $0.pause() }
             stopTimer()
         } else {
@@ -340,8 +352,29 @@ final class PlaybackController: ObservableObject {
         let newPlayhead = currentEntry.seg.trimIn + (now - currentEntry.seg.sourceInTime)
         playheadTime = max(playheadTime - 0.1, newPlayhead)
 
-        // セグメント終端判定（1フレーム手前で切り替え）
+        // 次セグメントへの事前seek（終端0.5秒前に発行）
+        let preloadThreshold = 0.5
         let frameTime = 1.0 / 30.0
+        if now >= currentEntry.seg.sourceOutTime - preloadThreshold,
+           now < currentEntry.seg.sourceOutTime - frameTime,
+           preloadedNext == nil {
+            if let next = allSegments.first(where: { $0.seg.trimIn > currentEntry.seg.trimIn }),
+               next.device != activePreviewDevice || next.seg.id != currentEntry.seg.id {
+                let nextPlayer = players[next.device]
+                let twoFrames = CMTimeMakeWithSeconds(2.0 / 30.0, preferredTimescale: 600)
+                nextPlayer?.seek(
+                    to: CMTimeMakeWithSeconds(next.seg.sourceInTime, preferredTimescale: 600),
+                    toleranceBefore: twoFrames, toleranceAfter: .zero
+                ) { [weak self] finished in
+                    guard finished else { return }
+                    Task { @MainActor [weak self] in
+                        self?.preloadedNext = (next.device, next.seg.id)
+                    }
+                }
+            }
+        }
+
+        // セグメント終端判定（1フレーム手前で切り替え）
         guard now >= currentEntry.seg.sourceOutTime - frameTime else { return }
 
         // 終端処理：isSeeking を即セットして多重発火を防ぐ
@@ -397,7 +430,7 @@ struct PreviewView: View {
     /// 保存済みの編集状態（起動時に復元に使う）
     var savedEditState: [String: [SegmentState]] = [:]
     /// 撮影時の向き設定（クロップ・エクスポートに使用）
-    var desiredOrientation: VideoOrientation = .landscape
+    var desiredOrientation: VideoOrientation = .cinema
 
     @Environment(\.dismiss) private var dismiss
 
@@ -413,7 +446,7 @@ struct PreviewView: View {
     /// 前回選択されていたデバイス（行き来確定に使う）
     @State private var previousSelectedDevice: String = ""
     @State private var thumbnails: [String: [UIImage]] = [:]
-    @State private var previewAspectRatio: CGFloat = 16 / 9
+    @State private var previewAspectRatio: CGFloat = 16.0 / 9.0
     @State private var timelineWidth: CGFloat = 1  // 後方互換のため残す（未使用）
     @State private var isPlayheadDragging: Bool = false
     @State private var showExportResult = false
@@ -454,8 +487,7 @@ struct PreviewView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        Group {
             if videos.isEmpty {
                 emptyState
             } else {
@@ -468,12 +500,16 @@ struct PreviewView: View {
                 }
             }
         }
+        .background(Color.black.ignoresSafeArea())
         .task {
             currentTitle = sessionTitle
             try? await Task.sleep(nanoseconds: 400_000_000)
             await setupAll()
         }
         .onDisappear {
+            // 閉じる方法に関わらず編集状態を自動保存
+            // （×ボタン、マスターからの強制クローズ等すべてのケース）
+            onSaveEditState?(timeline.segmentsByDevice)
             playback.teardown()
         }
         // タイトル編集：キーボードが上がっても入力欄が見えるよう専用シートで表示
@@ -506,7 +542,7 @@ struct PreviewView: View {
                 showExportError = true
             }
         }
-        .alert("カメラロールに保存しました", isPresented: $showExportResult) {
+        .alert("Saved to Camera Roll", isPresented: $showExportResult) {
             Button("OK") {
                 showExportResult = false
                 exportedURL = nil
@@ -517,7 +553,7 @@ struct PreviewView: View {
                 exportingOverlay(progress: progress)
             }
         }
-        .alert("書き出し失敗", isPresented: $showExportError) {
+        .alert("Export Failed", isPresented: $showExportError) {
             Button("OK") {
                 showExportError = false
                 exportEngine.state = .idle
@@ -542,22 +578,23 @@ struct PreviewView: View {
 
     private var previewArea: some View {
         GeometryReader { geo in
+            let boxW = min(geo.size.height * previewAspectRatio, geo.size.width)
+            let boxH = min(geo.size.width / previewAspectRatio,  geo.size.height)
+
             ZStack {
-                // 黒画面ベース（常に最背面）
                 Color.black
 
                 ForEach(sortedDevices, id: \.self) { device in
                     if let player = playback.players[device] {
-                        VideoPlayer(player: player)
-                            .disabled(true)
+                        FillPlayerView(player: player)
+                            .frame(width: boxW, height: boxH)
+                            .clipped()
                             .opacity(visibleDevice == device ? 1 : 0)
                     }
                 }
             }
-            .frame(
-                width:  min(geo.size.height * previewAspectRatio, geo.size.width),
-                height: min(geo.size.width / previewAspectRatio,  geo.size.height)
-            )
+            .frame(width: boxW, height: boxH)
+            .clipped()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity)
@@ -566,12 +603,16 @@ struct PreviewView: View {
     }
 
     /// 表示すべきデバイス。
-    /// - 再生中かつ activePreviewDevice が有効 → activePreviewDevice（黒画面区間は ""）
-    /// - 停止中 → selectedDevice
+    /// - 再生中 → activePreviewDevice（再生エンジンが管理）
+    /// - 停止中 → 再生ヘッド位置にセグメントがあるデバイス。なければ selectedDevice
     private var visibleDevice: String {
         if playback.isPlaying {
             return playback.activePreviewDevice  // "" のとき全プレイヤーが opacity 0 → 黒画面
         } else {
+            // 再生ヘッド位置にセグメントがあるデバイスを優先表示
+            if let activeDevice = timeline.activeDevice(at: playback.playheadTime) {
+                return activeDevice
+            }
             return selectedDevice
         }
     }
@@ -758,11 +799,11 @@ struct PreviewView: View {
                         .foregroundColor(.white)
                 }
 
-                Text("書き出し中...")
+                Text("Exporting...")
                     .font(.headline)
                     .foregroundColor(.white)
 
-                Button("キャンセル") {
+                Button("Cancel") {
                     exportEngine.cancel()
                 }
                 .font(.subheadline)
@@ -802,22 +843,18 @@ struct PreviewView: View {
                 // ① 固定ラベル列
                 VStack(spacing: 3) {
                     ForEach(sortedDevices, id: \.self) { device in
-                        Button(action: { handleDeviceTap(device) }) {
-                            VStack(spacing: 3) {
-                                Image(systemName: "video.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(selectedDevice == device ? .black : .white.opacity(0.4))
-                                Text(device)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(selectedDevice == device ? .black : .white.opacity(0.6))
-                                    .lineLimit(1).truncationMode(.tail)
-                                    .frame(width: fixedLabelWidth - 8)
-                            }
-                            .frame(width: fixedLabelWidth, height: rowH)
-                            .background(selectedDevice == device ? Color.white : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                        VStack(spacing: 3) {
+                            Image(systemName: "video.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.5))
+                            Text(device)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.7))
+                                .lineLimit(1).truncationMode(.tail)
+                                .frame(width: fixedLabelWidth - 8)
                         }
-                        .buttonStyle(.plain)
+                        .frame(width: fixedLabelWidth, height: rowH)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                 }
                 .padding(.leading, fixedLabelLeading)
@@ -860,18 +897,25 @@ struct PreviewView: View {
                                             onTrimIn: { segID, newSec in
                                                 editingSegmentIDs[device] = segID
                                                 timeline.moveTrimIn(segmentID: segID, device: device, newTrimIn: newSec)
-                                                playback.seekPreview(to: newSec, timeline: timeline, selectedDevice: selectedDevice)
+                                                // クランプ後の実際の trimIn に合わせる
+                                                let actual = timeline.segments(for: device).first(where: { $0.id == segID })?.trimIn ?? newSec
+                                                playback.playheadTime = actual
+                                                playback.seekPreview(to: actual, timeline: timeline, selectedDevice: device)
                                             },
                                             onTrimOut: { segID, newSec in
                                                 editingSegmentIDs[device] = segID
                                                 timeline.moveTrimOut(segmentID: segID, device: device, newTrimOut: newSec)
-                                                playback.seekPreview(to: newSec, timeline: timeline, selectedDevice: selectedDevice)
+                                                // クランプ後の実際の trimOut に合わせる
+                                                let actual = timeline.segments(for: device).first(where: { $0.id == segID })?.trimOut ?? newSec
+                                                playback.playheadTime = actual
+                                                playback.seekPreview(to: actual, timeline: timeline, selectedDevice: device)
                                             },
                                             onSlide: { segID, deltaSec in
                                                 editingSegmentIDs[device] = segID
                                                 timeline.moveSegment(segmentID: segID, device: device, deltaSeconds: deltaSec)
                                                 if let seg = timeline.segments(for: device).first(where: { $0.id == segID }) {
-                                                    playback.seekPreview(to: seg.trimIn, timeline: timeline, selectedDevice: selectedDevice)
+                                                    playback.playheadTime = seg.trimIn
+                                                    playback.seekPreview(to: seg.trimIn, timeline: timeline, selectedDevice: device)
                                                 }
                                             },
                                             onCommitSelection: { trimIn, trimOut in
@@ -884,7 +928,8 @@ struct PreviewView: View {
                                                 if let newSeg = timeline.segments(for: device).last {
                                                     editingSegmentIDs[device] = newSeg.id
                                                 }
-                                                playback.seekPreview(to: seconds, timeline: timeline, selectedDevice: selectedDevice)
+                                                playback.playheadTime = seconds
+                                                playback.seekPreview(to: seconds, timeline: timeline, selectedDevice: device)
                                                 editingDevices.insert(device)
                                             },
                                             onTap: { handleDeviceTap(device) },
@@ -900,6 +945,11 @@ struct PreviewView: View {
                                                     playback.playheadTime = seg.trimIn
                                                     playback.seekPreview(to: seg.trimIn, timeline: timeline, selectedDevice: device)
                                                 }
+                                            },
+                                            onDeleteSegment: { segID in
+                                                timeline.removeSegment(segmentID: segID, device: device)
+                                                editingSegmentIDs.removeValue(forKey: device)
+                                                editingDevices.remove(device)
                                             }
                                         )
                                     }
@@ -963,7 +1013,7 @@ struct PreviewView: View {
     private func handleDeviceTap(_ device: String) {
         let prev = selectedDevice
         if device != prev && editingDevices.contains(prev) {
-            timeline.commitAllSegments(for: prev)
+            // 前のデバイスの編集状態をクリア（排他制約は enforceExclusivity が管理）
             editingDevices.remove(prev)
             editingSegmentIDs.removeValue(forKey: prev)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -974,23 +1024,25 @@ struct PreviewView: View {
             playback.activePreviewDevice = device
             playback.seekPreview(to: playback.playheadTime, timeline: timeline, selectedDevice: device)
         }
-        Task {
-            if let url = videos[device] {
-                let fileRatio = await resolveAspectRatio(for: url)
-                // desiredOrientation に応じてアスペクト比をオーバーライド
-                previewAspectRatio = desiredOrientation == .landscape ? max(fileRatio, 16.0/9.0) : fileRatio
-            }
-        }
+        // desiredOrientation に応じてアスペクト比を設定
+        previewAspectRatio = desiredOrientation.aspectRatio
     }
 
     // MARK: - Playhead Overlay（ライン + ●ドラッグハンドル）
 
     /// ScrollView 内でのトラック先頭オフセット
     private var scrollLeftPad: CGFloat { trackInnerPad }
+    /// トラック右パディング（TimelineRow の trailing padding と一致させる）
+    private let trackTrailingPad: CGFloat = 12
+
+    /// TimelineRow 内の GeometryReader 幅と一致する有効トラック幅
+    private var effectiveTrackWidth: CGFloat {
+        max(scaledTrackWidth - trackInnerPad - trackTrailingPad, 1)
+    }
 
     private func playheadOverlay(trackHeight: CGFloat) -> some View {
         let ratio = totalDuration > 0 ? CGFloat(playback.playheadTime / totalDuration) : 0
-        let lineX = scrollLeftPad + ratio * scaledTrackWidth
+        let lineX = scrollLeftPad + ratio * effectiveTrackWidth
         let knob  = knobDiameter
 
         return ZStack(alignment: .topLeading) {
@@ -1012,8 +1064,8 @@ struct PreviewView: View {
                         .onChanged { v in
                             isPlayheadDragging = true
                             let startRatio = max(0, min(1,
-                                (v.startLocation.x - scrollLeftPad) / scaledTrackWidth))
-                            let deltaRatio = v.translation.width / scaledTrackWidth
+                                (v.startLocation.x - scrollLeftPad) / effectiveTrackWidth))
+                            let deltaRatio = v.translation.width / effectiveTrackWidth
                             let r = max(0, min(1, CGFloat(startRatio) + deltaRatio))
                             let sec = Double(r) * totalDuration
                             playback.playheadTime = sec
@@ -1221,8 +1273,8 @@ struct PreviewView: View {
 
             Spacer()
             Image(systemName: "video.slash").font(.system(size: 60)).foregroundColor(.white.opacity(0.4))
-            Text("動画がありません").foregroundColor(.white.opacity(0.6))
-            Text("動画ファイルが見つかりませんでした")
+            Text("No Videos").foregroundColor(.white.opacity(0.6))
+            Text("Video files not found")
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.3))
                 .multilineTextAlignment(.center)
@@ -1267,17 +1319,9 @@ struct PreviewView: View {
             }
         }
 
-        // サムネイル + アスペクト比を並列取得
-        async let thumbsTask: Void = generateAllThumbnails()
-        if let url = videos[selectedDevice] {
-            async let ratioTask = resolveAspectRatio(for: url)
-            let (_, ratio) = await (thumbsTask, ratioTask)
-            await MainActor.run {
-                previewAspectRatio = desiredOrientation == .landscape ? max(ratio, 16.0/9.0) : ratio
-            }
-        } else {
-            await thumbsTask
-        }
+        // サムネイル取得 + アスペクト比設定
+        await generateAllThumbnails()
+        previewAspectRatio = desiredOrientation.aspectRatio
     }
 
     // MARK: - Playback Logic（seekPreview / toggle / seekToSegment は PlaybackController へ移譲済み）
@@ -1293,16 +1337,6 @@ struct PreviewView: View {
             for await (device, imgs) in group { result[device] = imgs }
             await MainActor.run { thumbnails = result }
         }
-    }
-
-    private func resolveAspectRatio(for url: URL) async -> CGFloat {
-        let asset = AVURLAsset(url: url)
-        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return 16/9 }
-        let size = (try? await track.load(.naturalSize)) ?? .zero
-        let t    = (try? await track.load(.preferredTransform)) ?? .identity
-        let r    = size.applying(t)
-        let w = abs(r.width), h = abs(r.height)
-        return h > 0 ? w / h : 16/9
     }
 
     private func generateThumbnails(for url: URL, count: Int) async -> [UIImage] {
@@ -1352,6 +1386,8 @@ private struct TimelineRow: View {
     let onTap: () -> Void
     /// セグメントの青枠をタップしたときに、そのセグメントIDを通知する
     var onSegmentTap: ((UUID) -> Void)? = nil
+    /// トリムハンドルのダブルタップでセグメントを削除する
+    var onDeleteSegment: ((UUID) -> Void)? = nil
 
     @State private var draggingID: UUID? = nil
     @State private var dragStartX: CGFloat = 0
@@ -1367,33 +1403,52 @@ private struct TimelineRow: View {
         HStack(spacing: 0) {
             // デバイスラベル（showLabel=false のとき非表示）
             if showLabel {
-                Button(action: onTap) {
-                    VStack(spacing: 3) {
-                        Image(systemName: "video.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(isSelected ? .black : .white.opacity(0.4))
-                        Text(deviceName)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(isSelected ? .black : .white.opacity(0.6))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .frame(width: labelWidth - 8)
-                    }
-                    .frame(width: labelWidth, height: thumbHeight)
-                    .background(isSelected ? Color.white : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                VStack(spacing: 3) {
+                    Image(systemName: "video.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.5))
+                    Text(deviceName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(width: labelWidth - 8)
                 }
-                .buttonStyle(.plain)
+                .frame(width: labelWidth, height: thumbHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1).padding(.vertical, 4)
             }
 
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    // ① ベース：サムネイル表示（暗め）
-                    //    ※ セグメントの有無で黒切り替えはしない
-                    //    （初期化タイミングによって一時的に全黒になる問題を防ぐ）
+                    // ① ベース：サムネイル表示（暗め）+ 長押しでセグメント追加
+                    //    長押しジェスチャーはベースレイヤーに付けることで、
+                    //    セグメントやトリムハンドルのジェスチャーと競合しない
                     thumbnailStrip(width: geo.size.width, dimmed: true)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { v in
+                                    guard longPressTimer == nil else { return }
+                                    longPressLocation = v.location.x
+                                    let capturedWidth = geo.size.width
+                                    longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { _ in
+                                        Task { @MainActor in
+                                            guard self.totalDuration > 0, capturedWidth > 0 else { return }
+                                            let ratio = max(0, min(1, self.longPressLocation / capturedWidth))
+                                            let seconds = Double(ratio) * self.totalDuration
+                                            self.onAddSegment(seconds, capturedWidth)
+                                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                            self.onTap()
+                                        }
+                                    }
+                                }
+                                .onEnded { _ in
+                                    longPressTimer?.invalidate()
+                                    longPressTimer = nil
+                                }
+                        )
                     // ② 使用範囲ごとにサムネイルを明るくくり抜く＋常に青枠
                     ForEach(segments) { seg in
                         activeThumbnailClip(
@@ -1402,8 +1457,8 @@ private struct TimelineRow: View {
                             showBlueBorder: true
                         )
                     }
-                    // ③ トリムハンドル：選択中 かつ 編集モード かつ 対象セグメントのみ表示
-                    if isSelected && isEditing {
+                    // ③ トリムハンドル：編集モード かつ 対象セグメントのみ表示
+                    if isEditing {
                         ForEach(segments) { seg in
                             if seg.id == editingSegmentID {
                                 trimHandles(seg: seg, width: geo.size.width)
@@ -1411,32 +1466,6 @@ private struct TimelineRow: View {
                         }
                     }
                 }
-                // 位置付き長押し検出：
-                // DragGesture(minimumDistance:0) でタッチ位置を記録し、
-                // 0.4秒後に発火するタイマーで長押しとみなす
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { v in
-                            guard longPressTimer == nil else { return }
-                            longPressLocation = v.location.x
-                            let capturedWidth = geo.size.width
-                            longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { _ in
-                                Task { @MainActor in
-                                    guard self.totalDuration > 0, capturedWidth > 0 else { return }
-                                    let ratio = max(0, min(1, self.longPressLocation / capturedWidth))
-                                    let seconds = Double(ratio) * self.totalDuration
-                                    // onAddSegment 内で editingDevices.insert(device) が呼ばれる
-                                    self.onAddSegment(seconds, capturedWidth)
-                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                    self.onTap()
-                                }
-                            }
-                        }
-                        .onEnded { _ in
-                            longPressTimer?.invalidate()
-                            longPressTimer = nil
-                        }
-                )
             }
             .frame(height: thumbHeight)
         }
@@ -1446,10 +1475,10 @@ private struct TimelineRow: View {
         .overlay(
             RoundedRectangle(cornerRadius: showLabel ? 8 : 4)
                 .stroke(
-                    isEditing && isSelected
+                    isEditing
                         ? Color.white.opacity(0.5)
                         : Color.white.opacity(0.08),
-                    lineWidth: isEditing && isSelected ? 1.5 : 0.5
+                    lineWidth: isEditing ? 1.5 : 0.5
                 )
         )
     }
@@ -1602,12 +1631,20 @@ private struct TimelineRow: View {
                 handleBar
                     .frame(width: handleWidth, height: thumbHeight)
                     .offset(x: inX - handleWidth)
+                    .onTapGesture(count: 2) {
+                        onDeleteSegment?(seg.id)
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    }
                     .gesture(inHandleGesture(seg: seg, width: width))
 
                 // OUT点ハンドル：左端を outX に合わせる
                 handleBar
                     .frame(width: handleWidth, height: thumbHeight)
                     .offset(x: outX)
+                    .onTapGesture(count: 2) {
+                        onDeleteSegment?(seg.id)
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    }
                     .gesture(outHandleGesture(seg: seg, width: width))
 
                 // 中央エリア：スライドのみ（確定は別デバイス選択時）
@@ -1616,6 +1653,10 @@ private struct TimelineRow: View {
                         .frame(width: rangeW, height: thumbHeight)
                         .offset(x: inX)
                         .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            onDeleteSegment?(seg.id)
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        }
                         .gesture(slideGesture(seg: seg, width: width))
                 }
 
@@ -1747,6 +1788,34 @@ private struct TimelineRow: View {
                 // 確定はダブルタップで行うため、onEnded では何もしない
             }
     }
+}
+
+// MARK: - FillPlayerView (AVPlayerLayer with resizeAspectFill)
+
+/// UIViewRepresentable that uses AVPlayerLayer with videoGravity = .resizeAspectFill.
+/// This ensures all videos—regardless of their native orientation—fill the target box
+/// and get center-cropped identically.
+private struct FillPlayerView: UIViewRepresentable {
+    let player: AVPlayer
+
+    func makeUIView(context: Context) -> PlayerFillUIView {
+        let view = PlayerFillUIView()
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspectFill
+        view.backgroundColor = .black
+        return view
+    }
+
+    func updateUIView(_ uiView: PlayerFillUIView, context: Context) {
+        if uiView.playerLayer.player !== player {
+            uiView.playerLayer.player = player
+        }
+    }
+}
+
+private class PlayerFillUIView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
 // MARK: - Comparable + clamped

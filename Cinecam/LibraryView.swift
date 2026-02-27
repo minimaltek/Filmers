@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import AVFoundation
 import Combine
 
 struct LibraryView: View {
@@ -17,12 +18,15 @@ struct LibraryView: View {
     /// インライン名前編集中のレコードID
     @State private var renamingID: String? = nil
     @State private var renameDraft: String = ""
+    /// 複数選択モード
+    @State private var isSelectMode = false
+    @State private var selectedIDs: Set<String> = []
+    /// サムネイルキャッシュ
+    @State private var thumbnailCache: [String: UIImage] = [:]
 
     var body: some View {
         NavigationView {
-            ZStack {
-                Color.black.ignoresSafeArea()
-
+            Group {
                 if library.records.isEmpty {
                     emptyState
                 } else {
@@ -33,14 +37,16 @@ struct LibraryView: View {
                                 .listRowSeparatorTint(Color.white.opacity(0.1))
                         }
                         .onDelete { offsets in
-                            library.delete(at: offsets)
+                            if !isSelectMode {
+                                library.delete(at: offsets)
+                            }
                         }
                     }
                     .scrollContentBackground(.hidden)
                     .scrollDismissesKeyboard(.interactively)
                 }
             }
-            .navigationTitle("ライブラリ")
+            .background(Color.black.ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -50,9 +56,26 @@ struct LibraryView: View {
                     }
                     .foregroundColor(.white)
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    if isSelectMode {
+                        Button("Delete (\(selectedIDs.count))") {
+                            deleteSelected()
+                        }
+                        .foregroundColor(selectedIDs.isEmpty ? .gray : .red)
+                        .disabled(selectedIDs.isEmpty)
+
+                        Button("Done") {
+                            isSelectMode = false
+                            selectedIDs.removeAll()
+                        }
                         .foregroundColor(.white)
+                    } else {
+                        Button("Select") {
+                            isSelectMode = true
+                            selectedIDs.removeAll()
+                        }
+                        .foregroundColor(.white)
+                    }
                 }
             }
             .toolbarBackground(Color.black, for: .navigationBar)
@@ -70,35 +93,52 @@ struct LibraryView: View {
                     library.saveEditState(id: record.id, segmentsByDevice: segmentsByDevice)
                 },
                 savedEditState: record.editState,
-                desiredOrientation: VideoOrientation(rawValue: record.desiredOrientation ?? "横向き") ?? .landscape
+                desiredOrientation: VideoOrientation(rawValue: record.desiredOrientation ?? "横（シネマ）") ?? .cinema
             )
         }
+        .onAppear { generateThumbnails() }
+        .onChange(of: library.records.count) { _ in generateThumbnails() }
     }
 
     // MARK: - Row
 
     private func sessionRow(_ record: SessionRecord) -> some View {
         Button {
-            // タイトル編集中でなければ PreviewView へ
-            if renamingID == nil {
+            if isSelectMode {
+                toggleSelection(record.id)
+            } else if renamingID == nil {
                 selectedRecord = record
             }
         } label: {
             HStack(spacing: 12) {
-                // アイコン（タップで PreviewView へ）
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: 48, height: 48)
-                    Image(systemName: "film.stack")
-                        .font(.system(size: 20))
-                        .foregroundColor(.white.opacity(0.6))
+                // 選択モード時のチェックボックス
+                if isSelectMode {
+                    Image(systemName: selectedIDs.contains(record.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 22))
+                        .foregroundColor(selectedIDs.contains(record.id) ? .blue : .white.opacity(0.4))
+                }
+
+                // サムネイル
+                if let thumb = thumbnailCache[record.id] {
+                    Image(uiImage: thumb)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 64, height: 48)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.white.opacity(0.08))
+                            .frame(width: 64, height: 48)
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 18))
+                            .foregroundColor(.white.opacity(0.4))
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    // タイトル（編集中は TextField、それ以外はテキスト表示のみ）
                     if renamingID == record.id {
-                        TextField("タイトル", text: $renameDraft, onCommit: {
+                        TextField("Title", text: $renameDraft, onCommit: {
                             library.rename(id: record.id, title: renameDraft)
                             renamingID = nil
                         })
@@ -109,7 +149,6 @@ struct LibraryView: View {
                             library.rename(id: record.id, title: renameDraft)
                             renamingID = nil
                         }
-                        // TextField のタップが Button に伝わらないようにする
                         .onTapGesture { }
                     } else {
                         Text(record.title)
@@ -123,7 +162,7 @@ struct LibraryView: View {
                             .foregroundColor(.white.opacity(0.4))
                         Text("·")
                             .foregroundColor(.white.opacity(0.3))
-                        Text("\(record.videoPaths.count)台")
+                        Text("\(record.videoPaths.count) clips")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.4))
                     }
@@ -131,41 +170,42 @@ struct LibraryView: View {
 
                 Spacer()
 
-                // ペンアイコン：タイトル編集モードに入る
-                if renamingID == record.id {
-                    // 編集中はチェックマーク（確定ボタン）
-                    Button {
-                        library.rename(id: record.id, title: renameDraft)
-                        renamingID = nil
-                    } label: {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 28, height: 28)
-                            .background(Color.white.opacity(0.2))
-                            .clipShape(Circle())
+                if !isSelectMode {
+                    // ペンアイコン：タイトル編集モードに入る
+                    if renamingID == record.id {
+                        Button {
+                            library.rename(id: record.id, title: renameDraft)
+                            renamingID = nil
+                        } label: {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 28, height: 28)
+                                .background(Color.white.opacity(0.2))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .onTapGesture { }
+                    } else {
+                        Button {
+                            renameDraft = record.title == "UNTITLED" ? "" : record.title
+                            renamingID = record.id
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.5))
+                                .frame(width: 28, height: 28)
+                                .background(Color.white.opacity(0.08))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    .onTapGesture { }   // 行全体の Button に伝播させない
-                } else {
-                    Button {
-                        renameDraft = record.title == "UNTITLED" ? "" : record.title
-                        renamingID = record.id
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    } label: {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.5))
-                            .frame(width: 28, height: 28)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                }
 
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.3))
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.3))
+                }
             }
             .padding(.vertical, 4)
         }
@@ -179,9 +219,52 @@ struct LibraryView: View {
             Image(systemName: "film.stack")
                 .font(.system(size: 52))
                 .foregroundColor(.white.opacity(0.2))
-            Text("撮影済みセッションがありません")
+            Text("No sessions recorded")
                 .font(.subheadline)
                 .foregroundColor(.white.opacity(0.4))
+        }
+    }
+
+    // MARK: - Selection
+
+    private func toggleSelection(_ id: String) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
+    }
+
+    private func deleteSelected() {
+        guard !selectedIDs.isEmpty else { return }
+        for id in selectedIDs {
+            library.delete(id: id)
+            thumbnailCache.removeValue(forKey: id)
+        }
+        selectedIDs.removeAll()
+        isSelectMode = false
+    }
+
+    // MARK: - Thumbnails
+
+    private func generateThumbnails() {
+        for record in library.records {
+            guard thumbnailCache[record.id] == nil else { continue }
+            // 最初のビデオURLを取得
+            guard let firstURL = record.videos.values.first else { continue }
+            let recordID = record.id
+            Task.detached {
+                let asset = AVAsset(url: firstURL)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 128, height: 128)
+                if let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) {
+                    let uiImage = UIImage(cgImage: cgImage)
+                    await MainActor.run {
+                        thumbnailCache[recordID] = uiImage
+                    }
+                }
+            }
         }
     }
 }

@@ -26,9 +26,7 @@ struct ContentView: View {
     }
     
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            
+        Group {
             if selectedRole == nil {
                 // 役割選択画面
                 roleSelectionScreen
@@ -37,6 +35,7 @@ struct ContentView: View {
                 mainScreen
             }
         }
+        .background(Color.black.ignoresSafeArea())
         .onAppear {
             setupCallbacks()
         }
@@ -44,15 +43,21 @@ struct ContentView: View {
             cameraManager.stopSession()
         }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            dotCount = (dotCount + 1) % 4
+            dotCount = (dotCount + 1) % 9
         }
         .onChange(of: sessionManager.masterPeerID) { newMasterPeerID in
-            // マスターが設定され、かつ実際に接続済みピアがいる場合にスレーブに遷移
             if newMasterPeerID != nil,
                !sessionManager.isMaster,
                !sessionManager.connectedPeers.isEmpty {
+                // マスターが設定され、かつ実際に接続済みピアがいる場合にスレーブに遷移
                 withAnimation {
                     selectedRole = .slave
+                }
+            } else if newMasterPeerID == nil,
+                      selectedRole == .slave {
+                // マスターが切断された → 役割選択画面（SEARCHING状態）に戻る
+                withAnimation {
+                    selectedRole = nil
                 }
             }
         }
@@ -110,7 +115,7 @@ struct ContentView: View {
                 )
             }
         }
-        .alert("エラー", isPresented: .constant(cameraManager.error != nil)) {
+        .alert("Error", isPresented: .constant(cameraManager.error != nil)) {
             Button("OK") {
                 cameraManager.error = nil
             }
@@ -148,8 +153,8 @@ struct ContentView: View {
     
     private let accentGreen = Color(red: 0.0, green: 0.8, blue: 0.4)
     private let cyanTint = Color(red: 0.0, green: 0.7, blue: 0.65)
-    private let statusBlue = Color(red: 0.15, green: 0.3, blue: 0.7)
-    private let logoDotRed = Color(red: 0.85, green: 0.1, blue: 0.1)
+    private let statusBlue = Color(red: 0.3, green: 0.55, blue: 1.0)
+    private let logoDotWhite = Color.white
     
     /// アニメーションドット文字列（""→"."→".."→"..."）
     private var animatedDots: String {
@@ -164,7 +169,7 @@ struct ContentView: View {
             // ── ヘッダー ──
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotRed))
+                    (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
                         .font(.system(size: 32, weight: .black, design: .default))
                         .fontWidth(.compressed)
                         .tracking(-0.5)
@@ -396,15 +401,15 @@ struct ContentView: View {
         ZStack {
             // カメラプレビュー（背景）
             if sessionManager.isCameraReady, let previewLayer = cameraManager.previewLayer {
-                CameraPreviewView(previewLayer: previewLayer)
+                CameraPreviewView(previewLayer: previewLayer, cameraManager: cameraManager)
                     .ignoresSafeArea()
                 
-                // 横向きクロップ時のガイド表示（端末が縦で設定が横の場合、上下に黒帯）
+                // クロップガイド表示（desiredOrientationと端末の向きが異なる場合）
                 CropGuideOverlay(desiredOrientation: cameraManager.desiredOrientation)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
                 
-                // オーバーレイコントロール
+                // オーバーレイコントロール（セーフエリア内に配置）
                 CameraOverlayControls(
                     cameraManager: cameraManager,
                     sessionManager: sessionManager
@@ -415,7 +420,7 @@ struct ContentView: View {
                     // ── ヘッダー（roleSelectionScreenと統一） ──
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
-                            (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotRed))
+                            (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
                                 .font(.system(size: 32, weight: .black, design: .default))
                                 .fontWidth(.compressed)
                                 .tracking(-0.5)
@@ -636,21 +641,7 @@ struct ContentView: View {
     
     private var masterControlView: some View {
         VStack(spacing: 16) {
-            // ステータス表示
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(cameraManager.isRecording ? Color.red :
-                          sessionManager.isWaitingForCameraReady ? Color.orange : Color.gray)
-                    .frame(width: 8, height: 8)
-                Text(cameraManager.isRecording ? "RECORDING" :
-                     sessionManager.isWaitingForCameraReady ? "WAITING..." : "STANDBY")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(2)
-                    .foregroundColor(cameraManager.isRecording ? .red :
-                                     sessionManager.isWaitingForCameraReady ? .orange : .white.opacity(0.3))
-            }
-            
-            // Camera start button
+            // Camera start button (status is shown inside the button itself)
             if !sessionManager.isCameraReady {
                 let hasPeers = !sessionManager.connectedPeers.isEmpty
                 let isWaiting = sessionManager.isWaitingForCameraReady
@@ -659,9 +650,16 @@ struct ContentView: View {
                     sessionManager.startCameraForAll()
                 }) {
                     VStack(spacing: 10) {
-                        Image(systemName: isWaiting ? "hourglass" : "camera")
-                            .font(.system(size: 30, weight: .light))
-                            .foregroundColor(hasPeers || isWaiting ? .orange : .orange.opacity(0.4))
+                        if isWaiting {
+                            ProgressView()
+                                .tint(.orange)
+                                .scaleEffect(1.2)
+                                .frame(height: 30)
+                        } else {
+                            Image(systemName: "camera")
+                                .font(.system(size: 30, weight: .light))
+                                .foregroundColor(hasPeers ? .orange : .orange.opacity(0.4))
+                        }
                         
                         Text(isWaiting ? "WAITING" : "START CAMERA")
                             .font(.system(size: 14, weight: .bold, design: .monospaced))
@@ -672,7 +670,8 @@ struct ContentView: View {
                              hasPeers ? "ACTIVATE ALL NODES" : "NO NODES CONNECTED")
                             .font(.system(size: 9, weight: .medium, design: .monospaced))
                             .tracking(1)
-                            .foregroundColor(hasPeers ? .white.opacity(0.4) : .red.opacity(0.5))
+                            .foregroundColor(isWaiting ? .orange.opacity(0.5) :
+                                             hasPeers ? .white.opacity(0.4) : .red.opacity(0.5))
                     }
                     .frame(width: 150, height: 150)
                     .background(
@@ -708,17 +707,6 @@ struct ContentView: View {
     
     private var slaveWaitingView: some View {
         VStack(spacing: 16) {
-            // ステータス表示
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(cameraManager.isRecording ? Color.red : Color.gray)
-                    .frame(width: 8, height: 8)
-                Text(cameraManager.isRecording ? "RECORDING" : "STANDBY")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(2)
-                    .foregroundColor(cameraManager.isRecording ? .red : .white.opacity(0.3))
-            }
-            
             // Waiting indicator
             if !sessionManager.isCameraReady {
                 VStack(spacing: 10) {
@@ -766,46 +754,40 @@ struct ContentView: View {
 
 // MARK: - Crop Guide Overlay
 
-/// desiredOrientation と端末の実際の向きが異なる場合に、
+/// desiredOrientation のアスペクト比に合わせて、
 /// クロップされる領域を半透明の黒帯で示すオーバーレイ
 struct CropGuideOverlay: View {
     let desiredOrientation: VideoOrientation
     
     var body: some View {
         GeometryReader { geo in
-            let screenWidth = geo.size.width
-            let screenHeight = geo.size.height
-            let isScreenLandscape = screenWidth > screenHeight
+            let w = geo.size.width
+            let h = geo.size.height
+            let screenRatio = h > 0 ? w / h : 1.0
+            let targetRatio = desiredOrientation.aspectRatio
             
-            // 端末が縦持ちで横向き設定 → 上下に黒帯（16:9横長を中央に表示）
-            if desiredOrientation == .landscape && !isScreenLandscape {
-                let cropHeight = screenWidth * (9.0 / 16.0)
-                let barHeight = (screenHeight - cropHeight) / 2
+            if targetRatio > screenRatio + 0.05 {
+                // ターゲットの方が横長 → 上下に黒帯
+                let cropH = w / targetRatio
+                let bar = (h - cropH) / 2
                 VStack(spacing: 0) {
-                    Rectangle()
-                        .fill(Color.black.opacity(0.6))
-                        .frame(height: max(barHeight, 0))
+                    Rectangle().fill(Color.black.opacity(0.6)).frame(height: max(bar, 0))
                     Spacer()
-                    Rectangle()
-                        .fill(Color.black.opacity(0.6))
-                        .frame(height: max(barHeight, 0))
+                    Rectangle().fill(Color.black.opacity(0.6)).frame(height: max(bar, 0))
                 }
-            }
-            // 端末が横持ちで縦向き設定 → 左右に黒帯（9:16縦長を中央に表示）
-            else if desiredOrientation == .portrait && isScreenLandscape {
-                let cropWidth = screenHeight * (9.0 / 16.0)
-                let barWidth = (screenWidth - cropWidth) / 2
+            } else if targetRatio < screenRatio - 0.05 {
+                // ターゲットの方が縦長 → 左右に黒帯
+                let cropW = h * targetRatio
+                let bar = (w - cropW) / 2
                 HStack(spacing: 0) {
-                    Rectangle()
-                        .fill(Color.black.opacity(0.6))
-                        .frame(width: max(barWidth, 0))
+                    Rectangle().fill(Color.black.opacity(0.6)).frame(width: max(bar, 0))
                     Spacer()
-                    Rectangle()
-                        .fill(Color.black.opacity(0.6))
-                        .frame(width: max(barWidth, 0))
+                    Rectangle().fill(Color.black.opacity(0.6)).frame(width: max(bar, 0))
                 }
+            } else {
+                // アスペクト比がほぼ一致 → ガイド不要
+                Color.clear
             }
-            // 向きが一致 → ガイド不要
         }
     }
 }

@@ -18,10 +18,7 @@ struct FrameSetView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            VStack(spacing: 16) {
+        VStack(spacing: 16) {
                 // Top bar: Close (left) and In-Cam toggle (right)
                 HStack {
                     Button {
@@ -105,8 +102,8 @@ struct FrameSetView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
-            }
         }
+        .background(Color.black.ignoresSafeArea())
     }
 
     // MARK: - Helpers

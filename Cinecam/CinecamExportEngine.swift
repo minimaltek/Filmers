@@ -26,7 +26,7 @@ final class ExportEngine: ObservableObject {
     // MARK: - Public
 
     /// 書き出し実行 → カメラロールに保存
-    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .landscape) async {
+    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema) async {
         state = .exporting(progress: 0)
 
         do {
@@ -80,15 +80,15 @@ final class ExportEngine: ObservableObject {
     private func buildAndExport(
         timeline: ExclusiveEditTimeline,
         videos: [String: URL],
-        orientation: VideoOrientation = .landscape
+        orientation: VideoOrientation = .cinema
     ) async throws -> URL {
 
         // ① 使用するセグメントを trimIn 順に並べる
         struct EditClip {
             let url: URL
-            let sourceIn: CMTime   // 元ファイルの切り出し開始
-            let sourceOut: CMTime  // 元ファイルの切り出し終了
-            let trimIn: Double     // タイムライン上の開始時刻（ソート用）
+            let sourceIn: CMTime
+            let sourceOut: CMTime
+            let trimIn: Double
         }
 
         var clips: [EditClip] = []
@@ -110,48 +110,90 @@ final class ExportEngine: ObservableObject {
             throw ExportError.noClips
         }
 
-        // ② AVMutableComposition を組み立てる
-        let composition       = AVMutableComposition()
-        let videoTrack        = composition.addMutableTrack(
+        // ② Determine render size from orientation
+        //    Use the first clip to get a base resolution, then apply target aspect ratio
+        let renderSize = try await computeRenderSize(
+            firstClipURL: orderedClips[0].url,
+            orientation: orientation
+        )
+
+        // ③ AVMutableComposition + per-clip instructions
+        let composition = AVMutableComposition()
+        let videoTrack = composition.addMutableTrack(
             withMediaType: .video,
             preferredTrackID: kCMPersistentTrackID_Invalid
         )!
-        let audioTrack        = composition.addMutableTrack(
+        let audioTrack = composition.addMutableTrack(
             withMediaType: .audio,
             preferredTrackID: kCMPersistentTrackID_Invalid
         )!
 
+        // Track each clip's position in the composition timeline
+        struct ClipRange {
+            let compositionStart: CMTime
+            let duration: CMTime
+            let url: URL
+        }
+        var clipRanges: [ClipRange] = []
         var cursor = CMTime.zero
 
         for clip in orderedClips {
-            let asset      = AVURLAsset(url: clip.url)
-            let duration   = clip.sourceOut - clip.sourceIn
-            let timeRange  = CMTimeRange(start: clip.sourceIn, duration: duration)
-            // 映像トラック
+            let asset = AVURLAsset(url: clip.url)
+            let duration = clip.sourceOut - clip.sourceIn
+            let timeRange = CMTimeRange(start: clip.sourceIn, duration: duration)
+
             if let srcVideo = try? await asset.loadTracks(withMediaType: .video).first {
                 try videoTrack.insertTimeRange(timeRange, of: srcVideo, at: cursor)
             }
-            // 音声トラック（なくてもクラッシュしない）
             if let srcAudio = try? await asset.loadTracks(withMediaType: .audio).first {
                 try? audioTrack.insertTimeRange(timeRange, of: srcAudio, at: cursor)
             }
 
+            clipRanges.append(ClipRange(compositionStart: cursor, duration: duration, url: clip.url))
             cursor = cursor + duration
         }
 
-        // ③ 映像の向き・サイズを最初のクリップに合わせる（クロップ設定を含む）
-        let videoComposition = try await makeVideoComposition(
-            composition: composition,
-            firstAsset: AVURLAsset(url: orderedClips[0].url),
-            orientation: orientation
-        )
+        // ④ Build per-clip video composition instructions
+        let videoComp = AVMutableVideoComposition()
+        videoComp.renderSize = renderSize
+        videoComp.frameDuration = CMTimeMake(value: 1, timescale: 30)
 
-        // ④ 書き出し先
+        guard let compTrack = composition.tracks(withMediaType: .video).first else {
+            throw ExportError.sessionFailed
+        }
+
+        // Cache transforms per URL to avoid redundant loading
+        var transformCache: [URL: CGAffineTransform] = [:]
+        var instructions: [AVMutableVideoCompositionInstruction] = []
+
+        for range in clipRanges {
+            let transform: CGAffineTransform
+            if let cached = transformCache[range.url] {
+                transform = cached
+            } else {
+                transform = try await computeCropTransform(
+                    videoURL: range.url,
+                    renderSize: renderSize,
+                    orientation: orientation
+                )
+                transformCache[range.url] = transform
+            }
+
+            let instr = AVMutableVideoCompositionInstruction()
+            instr.timeRange = CMTimeRange(start: range.compositionStart, duration: range.duration)
+            let layerInstr = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
+            layerInstr.setTransform(transform, at: .zero)
+            instr.layerInstructions = [layerInstr]
+            instructions.append(instr)
+        }
+
+        videoComp.instructions = instructions
+
+        // ⑤ Export
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("cinecam_export_\(Int(Date().timeIntervalSince1970)).mp4")
         try? FileManager.default.removeItem(at: outputURL)
 
-        // ⑤ AVAssetExportSession で書き出し
         guard let session = AVAssetExportSession(
             asset: composition,
             presetName: AVAssetExportPresetHighestQuality
@@ -159,14 +201,13 @@ final class ExportEngine: ObservableObject {
             throw ExportError.sessionFailed
         }
 
-        session.outputURL          = outputURL
-        session.outputFileType     = .mp4
-        session.videoComposition   = videoComposition
+        session.outputURL = outputURL
+        session.outputFileType = .mp4
+        session.videoComposition = videoComp
         session.shouldOptimizeForNetworkUse = true
 
         self.exportSession = session
 
-        // 進捗を定期的に更新
         let progressTask = Task { [weak self] in
             while !Task.isCancelled {
                 await MainActor.run {
@@ -174,7 +215,7 @@ final class ExportEngine: ObservableObject {
                         self?.state = .exporting(progress: session.progress)
                     }
                 }
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
 
@@ -191,77 +232,79 @@ final class ExportEngine: ObservableObject {
         }
     }
 
-    // MARK: - VideoComposition（向き補正）
+    // MARK: - Render Size
 
-    private func makeVideoComposition(
-        composition: AVMutableComposition,
-        firstAsset: AVURLAsset,
-        orientation: VideoOrientation = .landscape
-    ) async throws -> AVMutableVideoComposition {
+    /// Compute the output render size based on the first clip's resolution and the target aspect ratio.
+    private func computeRenderSize(
+        firstClipURL: URL,
+        orientation: VideoOrientation
+    ) async throws -> CGSize {
+        let asset = AVURLAsset(url: firstClipURL)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            return CGSize(width: 1920, height: 804) // fallback cinema
+        }
+        let naturalSize = try await track.load(.naturalSize)
+        let transform = try await track.load(.preferredTransform)
+        let applied = naturalSize.applying(transform)
+        let w = abs(applied.width)
+        let h = abs(applied.height)
 
-        guard let firstVideoTrack = try await firstAsset.loadTracks(withMediaType: .video).first
-        else { return AVMutableVideoComposition(propertiesOf: composition) }
+        let targetRatio = orientation.aspectRatio
+        let sourceRatio = w / h
+        let tolerance: CGFloat = 0.05
 
-        let naturalSize = try await firstVideoTrack.load(.naturalSize)
-        let transform   = try await firstVideoTrack.load(.preferredTransform)
-        let applied     = naturalSize.applying(transform)
-        let sourceWidth  = abs(applied.width)
-        let sourceHeight = abs(applied.height)
-        
-        // クロップ判定: 向き設定と実映像のアスペクト比を比較
-        let isSourcePortrait = sourceHeight > sourceWidth
-        let needsCrop = (orientation == .landscape && isSourcePortrait)
-                     || (orientation == .portrait && !isSourcePortrait)
-        
-        let renderSize: CGSize
-        let finalTransform: CGAffineTransform
-        
-        if needsCrop && orientation == .landscape {
-            // 縦映像 → 横向きクロップ（中央の16:9領域を切り出し）
-            // 例: 1080x1920 → 1080x607.5 (中央クロップ) → renderSize: 1080x607
-            let cropWidth = sourceWidth
-            let cropHeight = sourceWidth * (9.0 / 16.0)
-            renderSize = CGSize(width: cropWidth, height: cropHeight)
-            
-            // 上下を中央クロップ: Y方向にオフセット
-            let offsetY = (sourceHeight - cropHeight) / 2.0
-            let cropTranslate = CGAffineTransform(translationX: 0, y: -offsetY)
-            finalTransform = transform.concatenating(cropTranslate)
-            
-        } else if needsCrop && orientation == .portrait {
-            // 横映像 → 縦向きクロップ（中央の9:16領域を切り出し）
-            let cropHeight = sourceHeight
-            let cropWidth = sourceHeight * (9.0 / 16.0)
-            renderSize = CGSize(width: cropWidth, height: cropHeight)
-            
-            let offsetX = (sourceWidth - cropWidth) / 2.0
-            let cropTranslate = CGAffineTransform(translationX: -offsetX, y: 0)
-            finalTransform = transform.concatenating(cropTranslate)
-            
+        if abs(sourceRatio - targetRatio) < tolerance {
+            return CGSize(width: w, height: h)
+        } else if targetRatio > sourceRatio {
+            // Crop top/bottom
+            return CGSize(width: w, height: w / targetRatio)
         } else {
-            // クロップ不要（向き設定と映像が一致）
-            renderSize = CGSize(width: sourceWidth, height: sourceHeight)
-            finalTransform = transform
+            // Crop left/right
+            return CGSize(width: h * targetRatio, height: h)
         }
+    }
 
-        let videoComp  = AVMutableVideoComposition()
-        videoComp.renderSize  = renderSize
-        videoComp.frameDuration = CMTimeMake(value: 1, timescale: 30)
+    // MARK: - Per-Clip Transform
 
-        // 全体を1つのインストラクションで向き補正+クロップを適用
-        let compVideoTracks = composition.tracks(withMediaType: .video)
-        let totalDuration = composition.duration
-        let singleInstr   = AVMutableVideoCompositionInstruction()
-        singleInstr.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
-
-        if let compTrack = compVideoTracks.first {
-            let layerInstr = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
-            layerInstr.setTransform(finalTransform, at: .zero)
-            singleInstr.layerInstructions = [layerInstr]
+    /// Compute the transform that maps a specific video's native frame into the target renderSize.
+    /// Handles videos with different orientations/sizes by scaling + centering + cropping.
+    private func computeCropTransform(
+        videoURL: URL,
+        renderSize: CGSize,
+        orientation: VideoOrientation
+    ) async throws -> CGAffineTransform {
+        let asset = AVURLAsset(url: videoURL)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            return .identity
         }
+        let naturalSize = try await track.load(.naturalSize)
+        let preferredTransform = try await track.load(.preferredTransform)
 
-        videoComp.instructions = [singleInstr]
-        return videoComp
+        // The "applied" size is how the video actually appears after its preferred transform
+        let applied = naturalSize.applying(preferredTransform)
+        let srcW = abs(applied.width)
+        let srcH = abs(applied.height)
+
+        let outW = renderSize.width
+        let outH = renderSize.height
+
+        // Scale to cover the render size (fill, not fit) then center-crop
+        let scaleX = outW / srcW
+        let scaleY = outH / srcH
+        let scale = max(scaleX, scaleY) // "cover" scale
+
+        let scaledW = srcW * scale
+        let scaledH = srcH * scale
+        let tx = (outW - scaledW) / 2.0
+        let ty = (outH - scaledH) / 2.0
+
+        // Final transform: first apply the video's preferred transform (rotation etc.),
+        // then scale to cover, then translate to center
+        let cropTransform = preferredTransform
+            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+            .concatenating(CGAffineTransform(translationX: tx, y: ty))
+
+        return cropTransform
     }
 
     // MARK: - Errors
@@ -274,10 +317,10 @@ final class ExportEngine: ObservableObject {
 
         var errorDescription: String? {
             switch self {
-            case .noClips:            return "書き出すクリップがありません"
-            case .sessionFailed:      return "書き出しセッションの作成に失敗しました"
-            case .cancelled:          return "書き出しがキャンセルされました"
-            case .photoLibraryDenied: return "カメラロールへのアクセスが許可されていません。設定アプリから許可してください"
+            case .noClips:            return "No clips to export"
+            case .sessionFailed:      return "Failed to create export session"
+            case .cancelled:          return "Export was cancelled"
+            case .photoLibraryDenied: return "Photo library access denied. Please allow access in Settings."
             }
         }
     }

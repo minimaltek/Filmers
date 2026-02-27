@@ -8,7 +8,7 @@
 import Foundation
 import AVFoundation
 import UIKit
-import Photos
+// Photos framework は不要（カメラロールへの保存は CinecamExportEngine で行う）
 import Combine
 
 class CameraManager: NSObject, ObservableObject {
@@ -59,7 +59,7 @@ class CameraManager: NSObject, ObservableObject {
     @Published var exposureBias: Float = 0.0  // 露出補正値
     
     // 録画設定
-    @Published var desiredOrientation: VideoOrientation = .landscape
+    @Published var desiredOrientation: VideoOrientation = .cinema
     var videoOrientation: AVCaptureVideoOrientation = .landscapeRight  // デフォルト: 横向き
     @Published var videoCodec: AVVideoCodecType = .hevc  // .h264, .hevc, .proRes422, .proRes4444
     
@@ -85,6 +85,50 @@ class CameraManager: NSObject, ObservableObject {
     
     // 録画完了コールバック
     var onRecordingCompleted: ((URL, String) -> Void)?  // (videoURL, sessionID)
+    
+    // MARK: - Orientation Helper
+    
+    /// 端末の現在の物理的な向きに対応する AVCaptureVideoOrientation を返す
+    static func currentCaptureOrientation() -> AVCaptureVideoOrientation {
+        // UIDevice.orientation is the physical device orientation,
+        // which updates even when interface rotation is locked.
+        switch UIDevice.current.orientation {
+        case .portrait:            return .portrait
+        case .portraitUpsideDown:   return .portraitUpsideDown
+        case .landscapeLeft:       return .landscapeRight  // device left = video right
+        case .landscapeRight:      return .landscapeLeft   // device right = video left
+        default:
+            // .faceUp / .faceDown / .unknown → fall back to interface orientation
+            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
+                return .portrait
+            }
+            switch scene.interfaceOrientation {
+            case .landscapeLeft:  return .landscapeLeft
+            case .landscapeRight: return .landscapeRight
+            default:              return .portrait
+            }
+        }
+    }
+    
+    /// プレビューと録画接続のorientationを現在の端末向きに更新する
+    func updateOrientationForConnections() {
+        let orientation = CameraManager.currentCaptureOrientation()
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            // 録画接続
+            if let connection = self.videoOutput?.connection(with: .video),
+               connection.isVideoOrientationSupported {
+                connection.videoOrientation = orientation
+            }
+            // プレビュー接続
+            DispatchQueue.main.async {
+                if let previewConnection = self.previewLayer?.connection,
+                   previewConnection.isVideoOrientationSupported {
+                    previewConnection.videoOrientation = orientation
+                }
+            }
+        }
+    }
     
     // MARK: - Initialization
     
@@ -177,6 +221,10 @@ class CameraManager: NSObject, ObservableObject {
             }
             return
         }
+        // Ensure device orientation notifications are enabled
+        DispatchQueue.main.async {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        }
         // AVCaptureSession の設定・起動はすべて専用直列キューで行う。
         // global(qos: .userInitiated) を使うと MCSession の内部処理と
         // スレッドプールを奪い合い、startRunning() の長時間ブロック（数秒）が
@@ -226,8 +274,8 @@ class CameraManager: NSObject, ObservableObject {
                     session.addOutput(output)
                     if let connection = output.connection(with: .video),
                        connection.isVideoOrientationSupported {
-                        // 常にポートレートで録画（クロップは表示・エクスポート時に行う）
-                        connection.videoOrientation = .portrait
+                        // 端末の現在の向きに合わせて録画する
+                        connection.videoOrientation = CameraManager.currentCaptureOrientation()
                     }
                     print("✅ [CameraManager] Video output added")
                 }
@@ -238,8 +286,8 @@ class CameraManager: NSObject, ObservableObject {
                 let preview = AVCaptureVideoPreviewLayer(session: session)
                 preview.videoGravity = .resizeAspectFill
                 if preview.connection?.isVideoOrientationSupported == true {
-                    // プレビューも常にポートレート（端末の物理的な向きに合わせる）
-                    preview.connection?.videoOrientation = .portrait
+                    // 端末の現在の向きに合わせる
+                    preview.connection?.videoOrientation = CameraManager.currentCaptureOrientation()
                 }
 
                 // UI 更新だけメインスレッドへ
@@ -284,8 +332,29 @@ class CameraManager: NSObject, ObservableObject {
                   let session = self.captureSession,
                   let currentInput = self.videoInput else { return }
             
+            let previousPreset = session.sessionPreset
+            
             session.beginConfiguration()
             session.removeInput(currentInput)
+            
+            // ユーザー設定のプリセットに戻せるか試し、非対応なら降格
+            // （iPadのフロントカメラは4Kをサポートしないことが多い）
+            if camera.supportsSessionPreset(self.videoResolution) {
+                // バックカメラに戻す時など、ユーザー設定のプリセットに復帰
+                if session.sessionPreset != self.videoResolution {
+                    session.sessionPreset = self.videoResolution
+                    print("✅ [CameraManager] Preset restored to \(self.videoResolution.rawValue)")
+                }
+            } else {
+                let fallbacks: [AVCaptureSession.Preset] = [.hd1920x1080, .hd1280x720, .high]
+                for preset in fallbacks {
+                    if camera.supportsSessionPreset(preset) {
+                        session.sessionPreset = preset
+                        print("⚠️ [CameraManager] Preset downgraded to \(preset.rawValue) for \(camera.localizedName)")
+                        break
+                    }
+                }
+            }
             
             do {
                 let newInput = try AVCaptureDeviceInput(device: camera)
@@ -293,17 +362,41 @@ class CameraManager: NSObject, ObservableObject {
                     session.addInput(newInput)
                     self.videoInput = newInput
                     
+                    // ビデオ出力のorientation を再設定
+                    if let connection = self.videoOutput?.connection(with: .video),
+                       connection.isVideoOrientationSupported {
+                        connection.videoOrientation = CameraManager.currentCaptureOrientation()
+                    }
+                    
+                    // プレビューレイヤーのorientationも再設定
                     DispatchQueue.main.async {
                         self.currentCamera = camera
                         self.zoomFactor = 1.0
+                        if let previewConnection = self.previewLayer?.connection,
+                           previewConnection.isVideoOrientationSupported {
+                            previewConnection.videoOrientation = CameraManager.currentCaptureOrientation()
+                        }
                     }
                     
                     self.configureDevice(camera)
                     print("✅ カメラ切り替え: \(camera.localizedName)")
+                } else {
+                    // canAddInput失敗 → 元のカメラ入力を復元
+                    print("⚠️ [CameraManager] canAddInput failed – restoring previous camera")
+                    session.sessionPreset = previousPreset
+                    if session.canAddInput(currentInput) {
+                        session.addInput(currentInput)
+                    }
                 }
             } catch {
+                // 例外発生 → 元のカメラ入力を復元
+                print("❌ [CameraManager] switchCamera error: \(error.localizedDescription) – restoring previous camera")
+                session.sessionPreset = previousPreset
+                if session.canAddInput(currentInput) {
+                    session.addInput(currentInput)
+                }
                 DispatchQueue.main.async {
-                    self.error = "カメラの切り替えに失敗しました"
+                    self.error = "Failed to switch camera"
                 }
             }
             
@@ -596,29 +689,6 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     // MARK: - Helper Methods
-    
-    /// カメラロールに保存
-    private func saveToPhotoLibrary(videoURL: URL) {
-        PHPhotoLibrary.requestAuthorization { status in
-            guard status == .authorized else {
-                print("写真ライブラリへのアクセスが許可されていません")
-                return
-            }
-            
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: videoURL)
-            }) { success, error in
-                DispatchQueue.main.async {
-                    if success {
-                        print("✅ カメラロールに保存完了: \(videoURL.lastPathComponent)")
-                    } else if let error = error {
-                        print("❌ 保存失敗: \(error.localizedDescription)")
-                        self.error = "保存失敗: \(error.localizedDescription)"
-                    }
-                }
-            }
-        }
-    }
 }
 
 // MARK: - AVCaptureFileOutputRecordingDelegate
@@ -660,8 +730,8 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
         // ファイルパスを保存
         self.lastRecordedVideoURL = outputFileURL
         
-        // カメラロールに保存
-        saveToPhotoLibrary(videoURL: outputFileURL)
+        // カメラロールへの自動保存はしない
+        // （アプリ内Documents管理 → 書き出し時にのみカメラロールに保存する）
 
         // ✅ カメラセッションは停止しない（次の録画やプレビューに備えて維持する）
         //    セッション停止は stopSession()（onDisappear）でのみ行う
