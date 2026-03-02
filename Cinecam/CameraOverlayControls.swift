@@ -13,6 +13,10 @@ struct CameraOverlayControls: View {
     @ObservedObject var sessionManager: CameraSessionManager
     @Environment(\.horizontalSizeClass) var horizontalSizeClass
     @Environment(\.verticalSizeClass) var verticalSizeClass
+    /// ガイドモード: 0=セーフエリア, 1=セーフエリア+十字, 2=三分割法, 3=オフ
+    @State private var guideMode: Int = 0
+    /// マルチモニター表示フラグ
+    @State private var showMultiMonitor = false
     
     private var isLandscape: Bool {
         horizontalSizeClass == .regular ||
@@ -20,10 +24,18 @@ struct CameraOverlayControls: View {
     }
     
     var body: some View {
-        if isLandscape {
-            landscapeLayout
-        } else {
-            portraitLayout
+        ZStack {
+            // Guide overlay (modes 0-2)
+            if guideMode < 3 {
+                guideOverlay
+                    .allowsHitTesting(false)
+            }
+            
+            if isLandscape {
+                landscapeLayout
+            } else {
+                portraitLayout
+            }
         }
     }
     
@@ -75,10 +87,14 @@ struct CameraOverlayControls: View {
     private var landscapeLayout: some View {
         ZStack {
             HStack(spacing: 0) {
-                // Left side: close, torch, focus, exposure
+                // Left side: close, torch, action safe, focus, exposure
                 VStack(alignment: .leading, spacing: 16) {
                     closeButton
-                    torchButton
+                    if cameraManager.hasTorch {
+                        torchButton
+                    }
+                    guideToggle
+                    multiMonitorButton
                     
                     Spacer()
                     
@@ -95,15 +111,17 @@ struct CameraOverlayControls: View {
                 Spacer()
                 
                 // Right side: lens buttons + front/back toggle
-                VStack(spacing: 16) {
+                VStack(spacing: 12) {
                     if cameraManager.isRecording {
                         recordingTimerBadge
                     }
                     
                     Spacer()
                     
-                    lensSelector(vertical: true)
                     frontBackToggle
+                    lensSelector(vertical: true)
+                    
+                    Spacer()
                 }
                 .padding(.trailing, 20)
                 .padding(.vertical, 20)
@@ -128,13 +146,18 @@ struct CameraOverlayControls: View {
     private var topBarPortrait: some View {
         HStack {
             closeButton
-            torchButton
+            if cameraManager.hasTorch {
+                torchButton
+            }
             
             Spacer()
             
             if cameraManager.isRecording {
                 recordingTimerBadge
             }
+            
+            guideToggle
+            multiMonitorButton
         }
     }
     
@@ -322,6 +345,137 @@ struct CameraOverlayControls: View {
         }
         .disabled(sessionManager.isWaitingForReady || !sessionManager.isMaster)
         .opacity(sessionManager.isMaster ? 1.0 : 0.5)
+    }
+    
+    // MARK: - Guide Overlay (4-stage cycle)
+    
+    private var guideToggle: some View {
+        controlButton(
+            icon: "rectangle.inset.filled",
+            isActive: guideMode < 3
+        ) {
+            guideMode = (guideMode + 1) % 4
+        }
+    }
+    
+    private var multiMonitorButton: some View {
+        controlButton(
+            icon: "rectangle.split.2x2",
+            isActive: false
+        ) {
+            sessionManager.startMultiMonitor()
+            showMultiMonitor = true
+        }
+        .fullScreenCover(isPresented: $showMultiMonitor) {
+            MultiMonitorView(sessionManager: sessionManager, cameraManager: cameraManager)
+        }
+    }
+    
+    private var guideOverlay: some View {
+        GeometryReader { geo in
+            let crop = cropRect(screen: geo.size)
+            
+            // Mode 0: セーフエリア枠
+            // Mode 1: セーフエリア枠 + 中央十字
+            // Mode 2: 三分割法グリッド
+            
+            switch guideMode {
+            case 0:
+                // セーフエリア（クロップ領域の90%）
+                safeAreaRect(crop: crop)
+                
+            case 1:
+                // セーフエリア + 中央十字
+                safeAreaRect(crop: crop)
+                centerCrosshair(crop: crop)
+                
+            case 2:
+                // セーフエリア + その内側で三分割法
+                safeAreaRect(crop: crop)
+                ruleOfThirdsGrid(crop: crop)
+                
+            default:
+                EmptyView()
+            }
+        }
+        .ignoresSafeArea()
+    }
+    
+    /// セーフエリア枠（クロップ領域の90%）
+    private func safeAreaRect(crop: CGRect) -> some View {
+        let safeW = crop.width * 0.9
+        let safeH = crop.height * 0.9
+        return Rectangle()
+            .stroke(Color.white.opacity(0.4), lineWidth: 1)
+            .frame(width: safeW, height: safeH)
+            .position(x: crop.midX, y: crop.midY)
+    }
+    
+    /// 中央十字マーク
+    private func centerCrosshair(crop: CGRect) -> some View {
+        let armLen: CGFloat = 20
+        let cx = crop.midX
+        let cy = crop.midY
+        return ZStack {
+            // 水平線
+            Rectangle()
+                .fill(Color.white.opacity(0.5))
+                .frame(width: armLen * 2, height: 1)
+                .position(x: cx, y: cy)
+            // 垂直線
+            Rectangle()
+                .fill(Color.white.opacity(0.5))
+                .frame(width: 1, height: armLen * 2)
+                .position(x: cx, y: cy)
+        }
+    }
+    
+    /// 三分割法グリッド（セーフエリア内に描画）
+    private func ruleOfThirdsGrid(crop: CGRect) -> some View {
+        // セーフエリア（90%）の矩形を基準にする
+        let safeW = crop.width * 0.9
+        let safeH = crop.height * 0.9
+        let sx = crop.midX - safeW / 2
+        let sy = crop.midY - safeH / 2
+        return ZStack {
+            // 縦線2本
+            ForEach([1, 2], id: \.self) { i in
+                Rectangle()
+                    .fill(Color.white.opacity(0.3))
+                    .frame(width: 1, height: safeH)
+                    .position(x: sx + safeW * CGFloat(i) / 3.0, y: crop.midY)
+            }
+            // 横線2本
+            ForEach([1, 2], id: \.self) { i in
+                Rectangle()
+                    .fill(Color.white.opacity(0.3))
+                    .frame(width: safeW, height: 1)
+                    .position(x: crop.midX, y: sy + safeH * CGFloat(i) / 3.0)
+            }
+        }
+    }
+    
+    /// クロップ領域の矩形を計算
+    private func cropRect(screen: CGSize) -> CGRect {
+        let w = screen.width
+        let h = screen.height
+        guard h > 0 else { return .zero }
+        let screenRatio = w / h
+        let targetRatio = cameraManager.desiredOrientation.aspectRatio
+        
+        let cropW: CGFloat
+        let cropH: CGFloat
+        if targetRatio > screenRatio + 0.05 {
+            cropW = w
+            cropH = w / targetRatio
+        } else if targetRatio < screenRatio - 0.05 {
+            cropH = h
+            cropW = h * targetRatio
+        } else {
+            cropW = w
+            cropH = h
+        }
+        return CGRect(x: (w - cropW) / 2, y: (h - cropH) / 2, width: cropW, height: cropH)
     }
     
     // MARK: - Helper

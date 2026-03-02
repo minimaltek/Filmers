@@ -31,6 +31,7 @@ struct ClipSegment: Identifiable, Equatable {
 @MainActor
 final class ExclusiveEditTimeline: ObservableObject {
     @Published private(set) var segmentsByDevice: [String: [ClipSegment]] = [:]
+    @Published var lockedDevices: Set<String> = []
     private(set) var totalDuration: Double = 0
     private(set) var devices: [String] = []
 
@@ -78,6 +79,14 @@ final class ExclusiveEditTimeline: ObservableObject {
             }
         }
         segmentsByDevice = restored
+    }
+
+    func toggleLock(for device: String) {
+        if lockedDevices.contains(device) {
+            lockedDevices.remove(device)
+        } else {
+            lockedDevices.insert(device)
+        }
     }
 
     func moveTrimIn(segmentID: UUID, device: String, newTrimIn: Double) {
@@ -198,6 +207,9 @@ final class ExclusiveEditTimeline: ObservableObject {
         for device in devices {
             if device == deviceName {
                 result[device] = mySegs
+            } else if lockedDevices.contains(device) {
+                // ロック済みデバイスのセグメントは削らない
+                result[device] = segmentsByDevice[device] ?? []
             } else {
                 var others = segmentsByDevice[device] ?? []
                 for mySeg in mySegs {
@@ -215,12 +227,15 @@ final class ExclusiveEditTimeline: ObservableObject {
     /// `priorityDevice` が指定された場合、そのデバイスを最優先で処理し、
     /// 他デバイスのセグメントをトリムする。未指定時は `devices` 配列順。
     func enforceExclusivity(priorityDevice: String? = nil) {
-        // 優先デバイスを先頭にした処理順を構築
+        // 処理順: [ロック済みデバイス] → [priorityDevice(未ロック)] → [残り]
+        // 先に処理されたデバイスのセグメントが「勝つ」ので、ロック端末は常に保護される
+        let locked = devices.filter { lockedDevices.contains($0) }
+        let unlocked = devices.filter { !lockedDevices.contains($0) }
         let ordered: [String]
-        if let priority = priorityDevice, devices.contains(priority) {
-            ordered = [priority] + devices.filter { $0 != priority }
+        if let priority = priorityDevice, unlocked.contains(priority) {
+            ordered = locked + [priority] + unlocked.filter { $0 != priority }
         } else {
-            ordered = devices
+            ordered = locked + unlocked
         }
 
         // 優先順位順に処理：先に処理されたデバイスのセグメントが勝つ

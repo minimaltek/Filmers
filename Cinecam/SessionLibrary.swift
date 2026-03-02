@@ -28,12 +28,14 @@ struct SessionRecord: Identifiable, Codable, Equatable {
     var editState: [String: [SegmentState]]
     /// 撮影時の向き設定（"横向き" or "縦向き"）後方互換のためOptional
     var desiredOrientation: String?
+    /// ロックされたデバイス名の一覧
+    var lockedDevices: [String]?
 
     /// URL に復元した辞書
     /// パスはサンドボックス相対（ファイル名のみ）で保存し、
     /// 起動ごとに変わる Documents ディレクトリと結合して復元する
     var videos: [String: URL] {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return [:] }
         return videoPaths.compactMapValues { path -> URL? in
             // 旧形式（file:// 絶対URL文字列）との互換：ファイル名だけ取り出して再構築
             let fileName: String
@@ -66,10 +68,11 @@ struct SessionRecord: Identifiable, Codable, Equatable {
         videoPaths = try c.decode([String: String].self,    forKey: .videoPaths)
         editState  = (try? c.decode([String: [SegmentState]].self, forKey: .editState)) ?? [:]
         desiredOrientation = try? c.decode(String.self, forKey: .desiredOrientation)
+        lockedDevices = try? c.decode([String].self, forKey: .lockedDevices)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, createdAt, videoPaths, editState, desiredOrientation
+        case id, title, createdAt, videoPaths, editState, desiredOrientation, lockedDevices
     }
 }
 
@@ -103,12 +106,14 @@ final class SessionLibrary: ObservableObject {
         save()
     }
 
-    /// 編集状態（セグメント）を保存する
-    func saveEditState(id: String, segmentsByDevice: [String: [ClipSegment]]) {
+    /// 編集状態（セグメント + ロック）を保存する
+    func saveEditState(id: String, segmentsByDevice: [String: [ClipSegment]], lockedDevices: Set<String> = []) {
         // レコードがまだ存在しない場合（初回撮影直後）は何もしない
         // （ContentView 側で PreviewView 表示前に add() が呼ばれているはずだが念のため）
         guard let idx = records.firstIndex(where: { $0.id == id }) else {
+            #if DEBUG
             print("⚠️ [Library] saveEditState: record not found for id=\(id)")
+            #endif
             return
         }
         var newState: [String: [SegmentState]] = [:]
@@ -121,8 +126,11 @@ final class SessionLibrary: ObservableObject {
             }
         }
         records[idx].editState = newState
+        records[idx].lockedDevices = lockedDevices.isEmpty ? nil : Array(lockedDevices)
         save()
-        print("✅ [Library] Saved edit state for id=\(id), devices=\(newState.keys.sorted())")
+        #if DEBUG
+        print("✅ [Library] Saved edit state for id=\(id), devices=\(newState.keys.sorted()), locked=\(lockedDevices.sorted())")
+        #endif
     }
 
     /// セッションを削除する（ファイルも一緒に削除）
@@ -144,7 +152,7 @@ final class SessionLibrary: ObservableObject {
 
     /// レコードに紐づく動画ファイルを Documents から削除する
     private func deleteFiles(for record: SessionRecord) {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         for fileName in record.videoPaths.values {
             // videoPaths の値はファイル名のみで保存されている
             let actualFileName: String
@@ -155,7 +163,9 @@ final class SessionLibrary: ObservableObject {
             }
             let url = docs.appendingPathComponent(actualFileName)
             try? FileManager.default.removeItem(at: url)
+            #if DEBUG
             print("🗑️ [Library] Deleted file: \(actualFileName)")
+            #endif
         }
     }
 

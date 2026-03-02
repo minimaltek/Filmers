@@ -55,6 +55,23 @@ struct CameraPreviewView: UIViewRepresentable {
         @objc func orientationDidChange(_ notification: Notification) {
             // 端末の向きが変わったら、プレビュー・録画接続のorientationを更新
             cameraManager?.updateOrientationForConnections()
+            
+            // 回転後にプレビューレイヤーのフレームを強制的に再設定
+            // （SwiftUIのレイアウトサイクルとの競合でフレームがずれることがある）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let view = self?.view else { return }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                view.previewLayer.frame = view.bounds
+                CATransaction.commit()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let view = self?.view else { return }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                view.previewLayer.frame = view.bounds
+                CATransaction.commit()
+            }
         }
         
         deinit {
@@ -91,6 +108,17 @@ struct CameraPreviewView: UIViewRepresentable {
             CATransaction.setDisableActions(true)
             previewLayer.frame = bounds
             CATransaction.commit()
+            
+            // SwiftUIのレイアウト完了後にもう一度フレームを合わせる
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.previewLayer.frame != self.bounds {
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    self.previewLayer.frame = self.bounds
+                    CATransaction.commit()
+                }
+            }
         }
     }
 }

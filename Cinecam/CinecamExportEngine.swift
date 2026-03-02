@@ -7,6 +7,7 @@
 import Foundation
 import Combine
 import AVFoundation
+import CoreImage
 import Photos
 
 @MainActor
@@ -26,11 +27,12 @@ final class ExportEngine: ObservableObject {
     // MARK: - Public
 
     /// 書き出し実行 → カメラロールに保存
-    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema) async {
+    /// - audioSource: nil = 編集に従う（カット毎の音声）、デバイス名 = そのデバイスの音声を全編に使用
+    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema, audioSource: String? = nil, videoFilter: String? = nil) async {
         state = .exporting(progress: 0)
 
         do {
-            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation)
+            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation, audioSource: audioSource, videoFilter: videoFilter)
             // カメラロールに保存（失敗したら .done には絶対到達しない）
             do {
                 try await saveToPhotoLibrary(url: url)
@@ -80,7 +82,9 @@ final class ExportEngine: ObservableObject {
     private func buildAndExport(
         timeline: ExclusiveEditTimeline,
         videos: [String: URL],
-        orientation: VideoOrientation = .cinema
+        orientation: VideoOrientation = .cinema,
+        audioSource: String? = nil,
+        videoFilter: String? = nil
     ) async throws -> URL {
 
         // ① 使用するセグメントを trimIn 順に並べる
@@ -137,6 +141,31 @@ final class ExportEngine: ObservableObject {
         var clipRanges: [ClipRange] = []
         var cursor = CMTime.zero
 
+        // 音声ソースが指定されている場合、そのデバイスの音声トラックと長さを事前に取得
+        let audioSourceTrack: AVAssetTrack?
+        let audioSourceDuration: Double  // 音声ソースアセットの長さ（秒）
+        let audioVideoStart: Double      // タイムライン上の開始位置
+        if let audioDevice = audioSource, let audioURL = videos[audioDevice] {
+            let asset = AVURLAsset(url: audioURL)
+            let loadedAudioTracks = try await asset.loadTracks(withMediaType: .audio)
+            audioSourceTrack = loadedAudioTracks.first
+            // 音声トラック自体の長さを使用（動画全体の duration より正確）
+            if let aTrack = audioSourceTrack {
+                let audioTimeRange = try await aTrack.load(.timeRange)
+                audioSourceDuration = CMTimeGetSeconds(audioTimeRange.start + audioTimeRange.duration)
+            } else {
+                audioSourceDuration = CMTimeGetSeconds(try await asset.load(.duration))
+            }
+            audioVideoStart = timeline.videoRangeByDevice[audioDevice]?.start ?? 0
+            #if DEBUG
+            print("🔊 [Export] audioSource=\(audioDevice), audioTracks=\(loadedAudioTracks.count), duration=\(audioSourceDuration)s, videoStart=\(audioVideoStart)s")
+            #endif
+        } else {
+            audioSourceTrack = nil
+            audioSourceDuration = 0
+            audioVideoStart = 0
+        }
+
         for clip in orderedClips {
             let asset = AVURLAsset(url: clip.url)
             let duration = clip.sourceOut - clip.sourceIn
@@ -145,12 +174,70 @@ final class ExportEngine: ObservableObject {
             if let srcVideo = try? await asset.loadTracks(withMediaType: .video).first {
                 try videoTrack.insertTimeRange(timeRange, of: srcVideo, at: cursor)
             }
-            if let srcAudio = try? await asset.loadTracks(withMediaType: .audio).first {
+
+            if let srcAudioTrack = audioSourceTrack {
+                // 特定デバイスの音声を使用: clip の trimIn を音声ソースのソース時間に変換
+                let audioSrcTime = clip.trimIn - audioVideoStart
+                let durationSec = CMTimeGetSeconds(duration)
+                #if DEBUG
+                print("🔊 [Export] clip trimIn=\(clip.trimIn), audioSrcTime=\(audioSrcTime), dur=\(durationSec), audioDur=\(audioSourceDuration)")
+                #endif
+                // 音声ソースの範囲内かチェック（負の値や範囲超過はスキップ）
+                var audioInserted = false
+                if audioSrcTime >= -0.01 {
+                    // 音声アセットの実際の長さに収まるようクランプ
+                    let safeStart = max(audioSrcTime, 0)
+                    let clampedEnd = min(safeStart + durationSec, audioSourceDuration)
+                    let clampedDur = max(clampedEnd - safeStart, 0)
+                    if clampedDur > 0.001 {
+                        let clampedDuration = CMTimeMakeWithSeconds(clampedDur, preferredTimescale: 600)
+                        let audioTimeRange = CMTimeRange(
+                            start: CMTimeMakeWithSeconds(safeStart, preferredTimescale: 600),
+                            duration: clampedDuration
+                        )
+                        do {
+                            try audioTrack.insertTimeRange(audioTimeRange, of: srcAudioTrack, at: cursor)
+                            audioInserted = true
+                            // クランプで短くなった分を空区間で埋める
+                            let shortfall = duration - clampedDuration
+                            if CMTimeGetSeconds(shortfall) > 0.001 {
+                                audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor + clampedDuration, duration: shortfall))
+                            }
+                        } catch {
+                            #if DEBUG
+                            print("⚠️ [Export] Audio insert failed at \(safeStart): \(error.localizedDescription)")
+                            #endif
+                        }
+                    }
+                }
+                if !audioInserted {
+                    // 範囲外 or 挿入失敗: 無音の空区間を挿入（ギャップ防止）
+                    audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: duration))
+                }
+            } else if let srcAudio = try? await asset.loadTracks(withMediaType: .audio).first {
+                // 編集に従う: 各クリップ自身の音声を使用
                 try? audioTrack.insertTimeRange(timeRange, of: srcAudio, at: cursor)
             }
 
             clipRanges.append(ClipRange(compositionStart: cursor, duration: duration, url: clip.url))
             cursor = cursor + duration
+        }
+
+        // 音声トラックが空の場合は削除（空トラックがあるとエクスポートが失敗する場合がある）
+        if audioTrack.timeRange.duration == .zero {
+            composition.removeTrack(audioTrack)
+        } else {
+            // 音声トラックの長さが映像トラックと一致しない場合、
+            // 不足分を空区間で埋める（不一致だと "Operation Stopped" エラーになる）
+            let videoDuration = videoTrack.timeRange.duration
+            let audioDuration = audioTrack.timeRange.duration
+            let gap = videoDuration - audioDuration
+            if CMTimeGetSeconds(gap) > 0.001 {
+                audioTrack.insertEmptyTimeRange(CMTimeRange(start: audioDuration, duration: gap))
+                #if DEBUG
+                print("🔊 [Export] Audio track shorter than video by \(CMTimeGetSeconds(gap))s — padded with silence")
+                #endif
+            }
         }
 
         // ④ Build per-clip video composition instructions
@@ -187,7 +274,59 @@ final class ExportEngine: ObservableObject {
             instructions.append(instr)
         }
 
+        // 最後の instruction がコンポジション全体を確実にカバーするよう調整
+        // （CMTime の丸め誤差で末尾に隙間ができると "Operation Stopped" エラーになる）
+        if let lastInstr = instructions.last {
+            let compEnd = cursor  // composition の合計長
+            let instrEnd = lastInstr.timeRange.start + lastInstr.timeRange.duration
+            if instrEnd < compEnd {
+                lastInstr.timeRange = CMTimeRange(
+                    start: lastInstr.timeRange.start,
+                    duration: compEnd - lastInstr.timeRange.start
+                )
+            }
+        }
+
         videoComp.instructions = instructions
+
+        // ④-b フィルタ付きの場合は applyingCIFiltersWithHandler で CIFilter を適用
+        // layerInstruction の transform は applyingCIFiltersWithHandler では無視されるため、
+        // ハンドラー内で CIAffineTransform + 選択フィルタを一括適用する
+        let finalVideoComp: AVVideoComposition
+        if let filterName = videoFilter {
+            // クリップごとの transform と時間範囲をキャプチャ用にコピー
+            let capturedRanges = clipRanges
+            let capturedTransforms = transformCache
+            let size = renderSize
+            finalVideoComp = AVVideoComposition(asset: composition) { request in
+                var image = request.sourceImage.clampedToExtent()
+
+                // 現在の時刻に対応するクリップの transform を適用
+                let timeSec = CMTimeGetSeconds(request.compositionTime)
+                if let range = capturedRanges.first(where: {
+                    let start = CMTimeGetSeconds($0.compositionStart)
+                    let dur = CMTimeGetSeconds($0.duration)
+                    return timeSec >= start && timeSec < start + dur + 0.01
+                }), let transform = capturedTransforms[range.url] {
+                    image = image.transformed(by: transform)
+                }
+
+                // renderSize でクロップ
+                image = image.cropped(to: CGRect(origin: .zero, size: size))
+
+                // 選択フィルタを適用
+                if let ciFilter = CIFilter(name: filterName) {
+                    ciFilter.setValue(image, forKey: kCIInputImageKey)
+                    if let filtered = ciFilter.outputImage {
+                        image = filtered.cropped(to: CGRect(origin: .zero, size: size))
+                    }
+                }
+
+                request.finish(with: image, context: nil)
+            }
+        } else {
+            finalVideoComp = videoComp
+        }
 
         // ⑤ Export
         let outputURL = FileManager.default.temporaryDirectory
@@ -203,7 +342,7 @@ final class ExportEngine: ObservableObject {
 
         session.outputURL = outputURL
         session.outputFileType = .mp4
-        session.videoComposition = videoComp
+        session.videoComposition = finalVideoComp
         session.shouldOptimizeForNetworkUse = true
 
         self.exportSession = session
@@ -228,6 +367,12 @@ final class ExportEngine: ObservableObject {
         case .cancelled:
             throw ExportError.cancelled
         default:
+            #if DEBUG
+            if let err = session.error {
+                print("⚠️ [Export] session failed: \(err)")
+                print("⚠️ [Export] renderSize=\(renderSize), clips=\(orderedClips.count), cursor=\(CMTimeGetSeconds(cursor))s")
+            }
+            #endif
             throw session.error ?? ExportError.sessionFailed
         }
     }
@@ -253,14 +398,17 @@ final class ExportEngine: ObservableObject {
         let sourceRatio = w / h
         let tolerance: CGFloat = 0.05
 
+        // 偶数ピクセルに丸める（H.264/HEVC エンコーダの要件）
+        func roundToEven(_ v: CGFloat) -> CGFloat { CGFloat(Int(v / 2) * 2) }
+
         if abs(sourceRatio - targetRatio) < tolerance {
-            return CGSize(width: w, height: h)
+            return CGSize(width: roundToEven(w), height: roundToEven(h))
         } else if targetRatio > sourceRatio {
             // Crop top/bottom
-            return CGSize(width: w, height: w / targetRatio)
+            return CGSize(width: roundToEven(w), height: roundToEven(w / targetRatio))
         } else {
             // Crop left/right
-            return CGSize(width: h * targetRatio, height: h)
+            return CGSize(width: roundToEven(h * targetRatio), height: roundToEven(h))
         }
     }
 

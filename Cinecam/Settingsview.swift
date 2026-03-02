@@ -129,7 +129,9 @@ struct SettingsView: View {
         cameraManager.desiredOrientation = selectedOrientation
         cameraManager.videoOrientation = selectedOrientation.avOrientation
         cameraManager.videoCodec = selectedCodec.avCodec
+        #if DEBUG
         print("📹 Settings changed: orientation=\(selectedOrientation.rawValue), codec=\(selectedCodec.rawValue)")
+        #endif
     }
 }
 

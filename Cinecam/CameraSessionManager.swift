@@ -13,7 +13,8 @@ class CameraSessionManager: NSObject, ObservableObject {
     // MARK: - Properties
     
     private let serviceType = "cinecam-sync"
-    private let myPeerID: MCPeerID
+    private var myPeerID: MCPeerID
+    private let myDisplayName: String
     
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
@@ -25,18 +26,102 @@ class CameraSessionManager: NSObject, ObservableObject {
     @Published var connectionState: ConnectionState = .disconnected
     @Published var sessionID: String = ""
     @Published var masterPeerID: MCPeerID? = nil  // マスター端末のID
+    
+    /// 永続的な役割フラグ。true の間は、明示的な DISCONNECT 以外で isMaster / masterPeerID をリセットしない
+    @Published var persistentRole: Bool = false
+    /// マスターの displayName を記憶する（再接続時の照合用）
+    var persistentMasterName: String? = nil
     @Published var isConnecting = false  // 接続処理中フラグ
     
     // ログ表示用
     @Published var logs: [String] = []
     
-    // 招待済みピアを記録
-    private var invitedPeers: Set<MCPeerID> = []
+    // 招待済みピアを記録（displayName で管理。MCPeerID は同一デバイスでもインスタンスが異なるため参照比較が効かない）
+    private var invitedPeerNames: Set<String> = []
+    // CONNECTING 中のピアを追跡（displayName で管理）。二重招待受け入れを防止する。
+    // ★ このDictはMCSessionデリゲートキュー（バックグラウンド）とメインスレッドの両方からアクセスされるため
+    //   専用のシリアルキューで保護する
+    // value = CONNECTING 状態になった時刻（stale 判定用）
+    private var _connectingPeerNames: [String: Date] = [:]
+    private let connectingLock = DispatchQueue(label: "cinecam.connectingLock")
+    
+    /// CONNECTING のstale判定しきい値（Hang環境では10秒以上CONNECTINGが続くことがある）
+    private let connectingStaleThreshold: TimeInterval = 15.0
+    
+    /// スレッドセーフな connectingPeerNames アクセサ
+    private func isConnectingPeer(_ name: String) -> Bool {
+        connectingLock.sync { _connectingPeerNames[name] != nil }
+    }
+    /// CONNECTING 中かつ stale でないかチェック（stale なら false を返す＝新しい招待を受け入れ可能）
+    private func isConnectingPeerFresh(_ name: String) -> Bool {
+        connectingLock.sync {
+            guard let started = _connectingPeerNames[name] else { return false }
+            return Date().timeIntervalSince(started) < connectingStaleThreshold
+        }
+    }
+    private func addConnectingPeer(_ name: String) {
+        connectingLock.sync { _connectingPeerNames[name] = Date() }
+    }
+    private func removeConnectingPeer(_ name: String) {
+        connectingLock.sync { _ = _connectingPeerNames.removeValue(forKey: name) }
+    }
+    private func clearConnectingPeers() {
+        connectingLock.sync { _connectingPeerNames.removeAll() }
+    }
+    
+    /// outgoing 招待の連続失敗カウント。3回以上連続で Connection refused したら
+    /// 自分からの招待を止めて受け身モードに切り替える（相手からの招待を待つ）
+    private var consecutiveOutgoingFailures: Int = 0
+    private let passiveModeThreshold: Int = 2
     
     // 再接続リトライ用タイマー
     private var retryWorkItems: [String: DispatchWorkItem] = [:]
     private let maxRetryCount = 5
     private var retryCounts: [String: Int] = [:]
+    /// リトライ中フラグ（UI でリトライ中表示に使う）
+    @Published var isRetrying: Bool = false
+    
+    /// 接続直後の猶予期間（デバッガ Hang による即座の切断を無視するため）
+    /// key = peerName, value = 接続確立時刻
+    /// ★ MCSessionデリゲートキュー（BG）とメインスレッドの両方からアクセスされるため connectingLock で保護
+    private var _connectionTimestamps: [String: Date] = [:]
+    /// 接続確立後にこの秒数以内の切断は無視してリトライしない（Hang耐性）
+    private let connectionGracePeriod: TimeInterval = 10.0
+    
+    private func setConnectionTimestamp(_ name: String) {
+        connectingLock.sync { _connectionTimestamps[name] = Date() }
+    }
+    private func getConnectionTimestamp(_ name: String) -> Date? {
+        connectingLock.sync { _connectionTimestamps[name] }
+    }
+    private func removeConnectionTimestamp(_ name: String) {
+        connectingLock.sync { _ = _connectionTimestamps.removeValue(forKey: name) }
+    }
+    private func clearConnectionTimestamps() {
+        connectingLock.sync { _connectionTimestamps.removeAll() }
+    }
+    
+    // MARK: - Device Score（招待戦略の優先度判定に使用）
+    // スコアが高い端末が招待を送る側（initiator）になる
+    // スコアが低い端末は受け身で待つ（responder）
+    // → スペックの高い端末のソケットに接続しに行く方が Connection refused が起きにくい
+    
+    /// 自端末のスペックスコア（起動時に一度だけ算出）
+    let deviceScore: Int = {
+        let info = ProcessInfo.processInfo
+        let cores = info.activeProcessorCount
+        let memGB = Int(info.physicalMemory / (1024 * 1024 * 1024))
+        // コア数 × 1000 + メモリGB でスコア化
+        return cores * 1000 + memGB
+    }()
+    
+    /// advertiser の discoveryInfo に載せる辞書
+    private var discoveryDict: [String: String] {
+        ["score": "\(deviceScore)"]
+    }
+    
+    /// 発見したピアのスコア（UI表示用）
+    @Published var peerScores: [String: Int] = [:]
     
     // カメラマネージャー（外部から注入）
     weak var cameraManager: CameraManager?
@@ -76,6 +161,14 @@ class CameraSessionManager: NSObject, ObservableObject {
     @Published var isWaitingForCameraReady = false      // カメラ起動待機中フラグ
     private var cameraReadyPeers: Set<MCPeerID> = []    // camera_ready を返してきたピア集合
     
+    // MARK: - Multi-Monitor
+    /// マルチモニター表示中フラグ
+    @Published var isMultiMonitorActive = false
+    /// 各デバイスの最新スナップショット [displayName: JPEG Data]
+    @Published var peerSnapshots: [String: Data] = [:]
+    /// スナップショット送信タイマー
+    private var snapshotTimer: Timer?
+    
     // デバイス名の配列（UI用）
     var connectedPeerNames: [String] {
         connectedPeers.map { $0.displayName }
@@ -85,12 +178,14 @@ class CameraSessionManager: NSObject, ObservableObject {
     private func addLog(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         DispatchQueue.main.async {
-            self.logs.insert("[\(timestamp)] \(message)", at: 0)
+            self.logs.append("[\(timestamp)] \(message)")
             if self.logs.count > 20 {
-                self.logs.removeLast()
+                self.logs.removeFirst()
             }
         }
+        #if DEBUG
         print(message)
+        #endif
     }
     
     enum ConnectionState {
@@ -112,6 +207,7 @@ class CameraSessionManager: NSObject, ObservableObject {
         // UserDefaults に保存されたユーザー名を使用。未設定ならデバイス名にフォールバック。
         let savedName = UserDefaults.standard.string(forKey: "cinecam.userName")?.trimmingCharacters(in: .whitespaces)
         let displayName = (savedName?.isEmpty == false) ? savedName! : UIDevice.current.name
+        self.myDisplayName = displayName
         self.myPeerID = MCPeerID(displayName: displayName)
         super.init()
         
@@ -121,11 +217,10 @@ class CameraSessionManager: NSObject, ObservableObject {
         // セッション作成（暗号化必須）
         session = MCSession(peer: myPeerID,
                            securityIdentity: nil,
-                           encryptionPreference: .required)
+                           encryptionPreference: .none)
         session?.delegate = self
         
-        // ★ アプリ起動時に自動的にAdvertise & Browse開始
-        // メインスレッドで少し遅延させて起動（即座に起動するとクラッシュする可能性があるため）
+        // ★ アプリ起動時に Advertise & Browse 両方開始（以前動いていた方式）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.startAutoDiscovery()
         }
@@ -142,7 +237,7 @@ class CameraSessionManager: NSObject, ObservableObject {
         
         // アドバタイズとブラウズ両方開始
         advertiser = MCNearbyServiceAdvertiser(peer: myPeerID,
-                                               discoveryInfo: nil,
+                                               discoveryInfo: discoveryDict,
                                                serviceType: serviceType)
         advertiser?.delegate = self
         advertiser?.startAdvertisingPeer()
@@ -152,22 +247,21 @@ class CameraSessionManager: NSObject, ObservableObject {
         browser?.startBrowsingForPeers()
         
         connectionState = .connecting
-        addLog("Auto-discovery started: \(myPeerID.displayName)")
+        addLog("Auto-discovery started: \(myPeerID.displayName) (score=\(deviceScore))")
     }
     
-    /// マスター役を選択（自動的に近くのデバイスをスレーブとして接続）
+    /// マスター役を選択（接続済みのピアに宣言を送信）
     func selectMasterRole() {
         isMaster = true
         masterPeerID = myPeerID
-        addLog("Selected as Master - slaves will auto-connect")
+        persistentRole = true
+        persistentMasterName = myPeerID.displayName
+        addLog("Selected as Master (persistent)")
 
-        // 既に接続済みのピアに role_selected を送信
+        // 既に接続済みのピアに master_announcement を送信
         for peer in connectedPeers {
             sendMasterAnnouncement(to: peer)
         }
-        
-        // 今後接続してくるピアも自動的にスレーブとして扱う
-        addLog("Camera startup deferred to REC button press")
     }
 
     /// マスター宣言を特定ピアに送信
@@ -185,7 +279,7 @@ class CameraSessionManager: NSObject, ObservableObject {
         
         // チャンネル確立を待つため少し遅延
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, self.connectedPeers.contains(peer) else { return }
+            guard let self, self.connectedPeers.contains(where: { $0.displayName == peer.displayName }) else { return }
             self.sendMasterAnnouncement(to: peer)
             self.addLog("Master announcement sent to \(peer.displayName)")
         }
@@ -195,20 +289,30 @@ class CameraSessionManager: NSObject, ObservableObject {
     func stopHosting() {
         advertiser?.stopAdvertisingPeer()
         browser?.stopBrowsingForPeers()
-        session?.disconnect()
+        // ★ disconnect() はソケットクローズ待ちでメインスレッドをブロックするため、バックグラウンドで実行
+        let oldSession = session
+        oldSession?.delegate = nil
+        if let old = oldSession {
+            DispatchQueue.global(qos: .utility).async { old.disconnect() }
+        }
         
         connectedPeers.removeAll()
         availablePeers.removeAll()
-        invitedPeers.removeAll()
+        invitedPeerNames.removeAll()
+        clearConnectingPeers()
         connectionState = .disconnected
         isConnecting = false
         isMaster = false
         masterPeerID = nil
+        persistentRole = false
+        persistentMasterName = nil
 
         // リトライ関連をクリア
         retryWorkItems.values.forEach { $0.cancel() }
         retryWorkItems.removeAll()
         retryCounts.removeAll()
+        isRetrying = false
+        consecutiveOutgoingFailures = 0  // 完全停止時はリセット
 
         // 同期録画状態リセット
         isWaitingForReady = false
@@ -217,32 +321,118 @@ class CameraSessionManager: NSObject, ObservableObject {
         pendingTimestamp = 0
         pendingMasterAnnouncement = false
         
+        // マルチモニターリセット
+        isMultiMonitorActive = false
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
+        peerSnapshots.removeAll()
+        cameraManager?.isSnapshotEnabled = false
+        
         // セッションを再作成（クリーンな状態にする）
         session = MCSession(peer: myPeerID,
                            securityIdentity: nil,
-                           encryptionPreference: .required)
+                           encryptionPreference: .none)
         session?.delegate = self
         
         addLog("Stopped completely")
     }
 
-    /// 接続失敗時に全体を再初期化して再接続を試みる
+    /// 切断が確定した後の共通処理（カメラ停止、リトライスケジュール等）
+    /// ★ 必ずメインスレッドから呼ぶこと
+    private func handleConfirmedDisconnect(peerName: String, peerID: MCPeerID) {
+        addLog("Disconnected: \(peerName)")
+        
+        let isActive = (cameraManager?.isRecording == true)
+            || isTransferring
+            || isWaitingForReady
+            || isTransitioningToPreview
+            || showPreview
+        
+        if connectedPeers.isEmpty && !isActive {
+            sessionID = ""
+            
+            isWaitingForCameraReady = false
+            cameraReadyPeers.removeAll()
+            
+            let cameraIsRunning = isCameraReady
+                || (cameraManager?.isCameraSessionRunning == true)
+            if cameraIsRunning {
+                isCameraReady = false
+                OrientationLock.isCameraActive = false
+                cameraManager?.stopSession()
+                addLog("Camera stopped – all peers disconnected")
+            }
+            
+            if isMultiMonitorActive {
+                isMultiMonitorActive = false
+                snapshotTimer?.invalidate()
+                snapshotTimer = nil
+                peerSnapshots.removeAll()
+                cameraManager?.isSnapshotEnabled = false
+            }
+            
+            if persistentRole {
+                connectionState = .connecting
+                addLog("Persistent mode – will retry (master=\(persistentMasterName ?? "nil"))")
+            } else {
+                connectionState = .disconnected
+                if !isMaster && masterPeerID != nil {
+                    masterPeerID = nil
+                    addLog("Master disconnected – returning to search")
+                } else {
+                    addLog("Disconnected – will retry connection")
+                }
+            }
+        } else {
+            addLog("Still have \(connectedPeers.count) peer(s) connected")
+        }
+        
+        if !isActive {
+            scheduleRetryConnection(for: peerID)
+        }
+    }
+    
+    /// 接続失敗時にリトライを試みる
+    /// - 最初の数回は軽量リトライ（招待フラグのクリア + 再発見待ち）
+    /// - それでもダメなら fullRestart で MCSession ごと再作成
     private func scheduleRetryConnection(for peerID: MCPeerID) {
         let peerName = peerID.displayName
         let currentCount = (retryCounts[peerName] ?? 0) + 1
         retryCounts[peerName] = currentCount
         
-        guard currentCount <= maxRetryCount else {
+        // 永続モードではリトライ上限を大幅に引き上げる
+        let effectiveMaxRetry = persistentRole ? 30 : maxRetryCount
+        
+        guard currentCount <= effectiveMaxRetry else {
             addLog("Retry limit reached for \(peerName)")
             retryCounts.removeValue(forKey: peerName)
+            if retryCounts.isEmpty { isRetrying = false }
+            
+            // 永続モードでリトライ上限に達しても、カウンタをリセットして再試行
+            if persistentRole {
+                addLog("Persistent mode – restarting retry cycle")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                    guard let self, self.persistentRole else { return }
+                    self.scheduleRetryConnection(for: peerID)
+                }
+            }
             return
         }
+        isRetrying = true
         
         // 既存のリトライをキャンセル
         retryWorkItems[peerName]?.cancel()
         
-        let delay = Double(currentCount) * 1.5  // 1.5秒, 3秒, 4.5秒...
-        addLog("Retry \(currentCount)/\(maxRetryCount) in \(String(format: "%.1f", delay))s")
+        // ★ 全リトライで rebuildSession（MCPeerID再生成）を使用
+        // "we never sent it an invitation" エラーを根絶するため、古い MCPeerID を使い回さない
+        // rebuild 内部に 2.5秒の待機があるのでリトライ側の遅延は控えめ
+        let delay: Double
+        if currentCount <= 2 {
+            delay = 1.0  // 1-2回目: すぐにリビルド
+        } else {
+            delay = 2.0 + Double(currentCount - 2) * 2.0  // 3回目以降: 徐々に遅延を増やす
+        }
+        addLog("Retry \(currentCount)/\(effectiveMaxRetry) in \(String(format: "%.1f", delay))s")
         
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -250,12 +440,38 @@ class CameraSessionManager: NSObject, ObservableObject {
             // 既に接続済みならスキップ
             guard !self.connectedPeers.contains(where: { $0.displayName == peerName }) else {
                 self.retryCounts.removeValue(forKey: peerName)
+                if self.retryCounts.isEmpty { self.isRetrying = false }
                 return
             }
             
-            // ★ MCSession + advertiser + browser を全部再作成してクリーンな状態にする
-            // （MCSessionの内部ステートマシンが壊れている可能性があるため）
-            self.fullRestart()
+            // ★ Passive mode: MCSession / MCPeerID はそのまま、advertiser/browser を再起動するだけ
+            // MCPeerID を再生成しないので相手側のブラウザが即座に再発見できる
+            // MCSession を nil にしないので incoming 招待を常に受け付けられる
+            if self.consecutiveOutgoingFailures >= self.passiveModeThreshold {
+                self.addLog("Retry: passive restart (count=\(currentCount)) – keeping session alive")
+                // ★ リトライカウントをリセットして、パッシブモード中に
+                // maxRetryCount に到達→リセット→currentCount=1 のサイクルで
+                // REBUILD に落ちないようにする
+                self.retryCounts.removeAll()
+                self.invitedPeerNames.removeAll()
+                self.clearConnectingPeers()
+                self.availablePeers.removeAll()
+                // advertiser/browser を再起動（MCSession は維持）
+                self.advertiser?.stopAdvertisingPeer()
+                self.browser?.stopBrowsingForPeers()
+                self.advertiser = MCNearbyServiceAdvertiser(peer: self.myPeerID,
+                                                            discoveryInfo: self.discoveryDict,
+                                                            serviceType: self.serviceType)
+                self.advertiser?.delegate = self
+                self.advertiser?.startAdvertisingPeer()
+                self.browser = MCNearbyServiceBrowser(peer: self.myPeerID, serviceType: self.serviceType)
+                self.browser?.delegate = self
+                self.browser?.startBrowsingForPeers()
+                self.addLog("Passive restart: advertiser/browser restarted – waiting for invitation")
+            } else {
+                self.addLog("Retry: rebuild session (count=\(currentCount))")
+                self.rebuildSession(preserveRole: true)
+            }
         }
         
         retryWorkItems[peerName] = workItem
@@ -263,52 +479,226 @@ class CameraSessionManager: NSObject, ObservableObject {
     }
     
     /// MCSession + advertiser + browser を完全に再初期化する（接続状態のみリセット、役割は維持）
+    /// ★ fullRestart は rebuildSession に統一（MCPeerID を毎回再生成して "we never sent it an invitation" を根絶）
     private func fullRestart() {
-        addLog("Full restart: reinitializing session...")
+        addLog("Full restart → delegating to rebuildSession")
+        rebuildSession(preserveRole: true)
+    }
+    
+    /// リビルド中フラグ（多重実行防止）
+    @Published var isRebuilding: Bool = false
+    /// リビルド開始時刻（Hang でスタックした場合のタイムアウト判定用）
+    private var rebuildStartedAt: Date?
+    /// リビルドの遅延再構築 WorkItem（キャンセル可能にするため保持）
+    private var rebuildWorkItem: DispatchWorkItem?
+
+    /// セッションを完全に再構築する（アプリを再起動したのと同等の効果）
+    /// MCPeerID は維持するが、MCSession / advertiser / browser を全て破棄→再作成する
+    /// - Parameter preserveRole: true の場合、isMaster / masterPeerID / persistentRole をリセットしない（自動リトライ用）
+    func rebuildSession(preserveRole: Bool = false) {
+        // ★ パッシブモード中の自動リトライでは REBUILD を禁止
+        // MCPeerID を再生成すると相手からの incoming 招待が切れるため、
+        // advertiser/browser の再起動だけで済ませる
+        if preserveRole && consecutiveOutgoingFailures >= passiveModeThreshold {
+            addLog("REBUILD: blocked in passive mode – doing passive restart instead")
+            invitedPeerNames.removeAll()
+            clearConnectingPeers()
+            availablePeers.removeAll()
+            advertiser?.stopAdvertisingPeer()
+            browser?.stopBrowsingForPeers()
+            advertiser = MCNearbyServiceAdvertiser(peer: myPeerID,
+                                                    discoveryInfo: discoveryDict,
+                                                    serviceType: serviceType)
+            advertiser?.delegate = self
+            advertiser?.startAdvertisingPeer()
+            browser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
+            browser?.delegate = self
+            browser?.startBrowsingForPeers()
+            addLog("Passive restart: advertiser/browser restarted – waiting for invitation")
+            return
+        }
         
+        // 多重実行ガード（ただし Hang でスタックしている場合はタイムアウトで突破）
+        if isRebuilding {
+            if let started = rebuildStartedAt, Date().timeIntervalSince(started) > 8.0 {
+                addLog("REBUILD: previous rebuild timed out (\(String(format: "%.1f", Date().timeIntervalSince(started)))s) – forcing restart")
+                rebuildWorkItem?.cancel()
+                rebuildWorkItem = nil
+                isRebuilding = false
+                // fall through to start new rebuild
+            } else {
+                addLog("REBUILD: already in progress, ignoring")
+                return
+            }
+        }
+        isRebuilding = true
+        rebuildStartedAt = Date()
+        addLog("REBUILD: tearing down session...")
+
+        // 前回の遅延 WorkItem が残っていたらキャンセル
+        rebuildWorkItem?.cancel()
+        rebuildWorkItem = nil
+
         // 1. 全部停止
         advertiser?.stopAdvertisingPeer()
         browser?.stopBrowsingForPeers()
-        session?.disconnect()
+        let oldSession = session
+        oldSession?.delegate = nil
+        // ★ disconnect() はソケットクローズ待ちでメインスレッドをブロックするため、
+        //    バックグラウンドキューで実行する
+        if let old = oldSession {
+            DispatchQueue.global(qos: .utility).async { old.disconnect() }
+        }
         advertiser = nil
         browser = nil
         
-        // 接続追跡をクリア（availablePeers, invitedPeersのみ。connectedPeersはMCSessionDelegateが管理）
-        invitedPeers.removeAll()
-        availablePeers.removeAll()
-        
-        // 2. MCSessionを新規作成
+        // ★ 新しい MCPeerID + MCSession を即座に作成
+        // REBUILD の 1.5秒待機中に相手からの招待が来ても session == nil で拒否しないようにする
+        myPeerID = MCPeerID(displayName: myDisplayName)
         session = MCSession(peer: myPeerID,
-                           securityIdentity: nil,
-                           encryptionPreference: .required)
+                             securityIdentity: nil,
+                             encryptionPreference: .none)
         session?.delegate = self
-        
-        // 3. advertiser/browserを新規作成＆開始
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+
+        // 2. 全ステートをクリア
+        connectedPeers.removeAll()
+        availablePeers.removeAll()
+        invitedPeerNames.removeAll()
+        clearConnectingPeers()
+        clearConnectionTimestamps()
+        connectionState = .disconnected
+        isConnecting = false
+        if !preserveRole {
+            isMaster = false
+            masterPeerID = nil
+            persistentRole = false
+            persistentMasterName = nil
+        }
+
+        retryWorkItems.values.forEach { $0.cancel() }
+        retryWorkItems.removeAll()
+        if !preserveRole {
+            retryCounts.removeAll()
+            isRetrying = false
+            // ★ consecutiveOutgoingFailures はリセットしない
+            // rebuild 後も passive mode を維持して iPad からの招待を待つ
+            // （接続成功時にのみリセットされる）
+        }
+
+        isWaitingForReady = false
+        readyPeers = []
+        pendingSessionID = ""
+        pendingTimestamp = 0
+        pendingMasterAnnouncement = false
+
+        isWaitingForCameraReady = false
+        cameraReadyPeers = []
+        isCameraReady = false
+
+        isMultiMonitorActive = false
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
+        peerSnapshots.removeAll()
+        cameraManager?.isSnapshotEnabled = false
+
+        addLog("REBUILD: all state cleared")
+
+        // 3. 古いソケットが完全に解放されるまで待ってから advertiser/browser を再起動
+        //    MCPeerID と MCSession は上で即座に作成済み（招待を拒否しないため）
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            
+
+            // Advertise + Browse 両方再開
             self.advertiser = MCNearbyServiceAdvertiser(peer: self.myPeerID,
-                                                        discoveryInfo: nil,
+                                                        discoveryInfo: self.discoveryDict,
                                                         serviceType: self.serviceType)
             self.advertiser?.delegate = self
             self.advertiser?.startAdvertisingPeer()
-            
+
             self.browser = MCNearbyServiceBrowser(peer: self.myPeerID, serviceType: self.serviceType)
             self.browser?.delegate = self
             self.browser?.startBrowsingForPeers()
-            
-            self.addLog("Session restarted – searching...")
+
+            self.connectionState = .connecting
+            self.isRebuilding = false
+            self.rebuildStartedAt = nil
+            self.addLog("REBUILD: session rebuilt (new PeerID) – searching...")
         }
+        rebuildWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
     }
-    
+
     /// 切断後にDiscoveryを再開始（役割選択画面に戻る時に使用）
     func restartDiscovery() {
         // まず完全停止
         stopHosting()
         
-        // 少し待ってからDiscoveryを再開始
+        // 役割をリセット
+        isMaster = false
+        masterPeerID = nil
+        
+        // 少し待ってから Advertise + Browse 再開始
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.startAutoDiscovery()
+        }
+    }
+
+    /// ディスカバリーを一時停止（設定画面など、バックグラウンド処理を止めたい時に使用）
+    /// advertiser は維持（相手からの招待を受け付けられるように）
+    /// browser とリトライだけ停止
+    func pauseDiscovery() {
+        // リトライを全停止
+        retryWorkItems.values.forEach { $0.cancel() }
+        retryWorkItems.removeAll()
+        isRetrying = false
+
+        // browser のみ停止（advertiser は相手からの招待受付のため維持）
+        browser?.stopBrowsingForPeers()
+        browser = nil
+        invitedPeerNames.removeAll()
+        availablePeers.removeAll()
+
+        addLog("Discovery paused (advertiser kept)")
+    }
+
+    /// ディスカバリーを再開（設定画面を閉じた時に使用）
+    func resumeDiscovery() {
+        // 既に接続済みなら再開不要
+        guard connectedPeers.isEmpty else {
+            addLog("Already connected, skip resume")
+            return
+        }
+        // browser が動いていなければ再開
+        if browser == nil {
+            browser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
+            browser?.delegate = self
+            browser?.startBrowsingForPeers()
+        }
+        // advertiser も念のため起動確認
+        if advertiser == nil {
+            advertiser = MCNearbyServiceAdvertiser(peer: myPeerID,
+                                                   discoveryInfo: discoveryDict,
+                                                   serviceType: serviceType)
+            advertiser?.delegate = self
+            advertiser?.startAdvertisingPeer()
+        }
+        connectionState = .connecting
+        addLog("Discovery resumed")
+    }
+
+    /// advertiser/browser を静かに再開する（ログや状態変更は最小限）
+    private func resumeDiscoveryQuietly() {
+        if advertiser == nil {
+            advertiser = MCNearbyServiceAdvertiser(peer: myPeerID,
+                                                   discoveryInfo: discoveryDict,
+                                                   serviceType: serviceType)
+            advertiser?.delegate = self
+            advertiser?.startAdvertisingPeer()
+        }
+        if browser == nil {
+            browser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
+            browser?.delegate = self
+            browser?.startBrowsingForPeers()
         }
     }
 
@@ -375,6 +765,13 @@ class CameraSessionManager: NSObject, ObservableObject {
             // マスターからのannouncementでプレビューが閉じられた → 役割はリセットしない
             pendingMasterAnnouncement = false
             addLog("Preview closed – slave role maintained (master=\(masterPeerID?.displayName ?? "nil"))")
+        } else if persistentRole {
+            // ★ 永続モード: マスターもスレーブも役割をリセットしない
+            if wasMaster {
+                addLog("Preview closed – master role persisted")
+            } else {
+                addLog("Preview closed – slave role persisted (master=\(masterPeerID?.displayName ?? "nil"))")
+            }
         } else if wasMaster {
             // マスターがプレビューを閉じた → マスター役のみリセット（roleSelectionScreenに戻す）
             isMaster = false
@@ -387,15 +784,26 @@ class CameraSessionManager: NSObject, ObservableObject {
             addLog("Preview closed – slave returning to await")
         }
         
-        // ★ 接続は維持（ただし、プレビュー中にピアが全員切断していた場合は disconnected にする）
+        // ★ 接続は維持
         if connectedPeers.isEmpty {
-            connectionState = .disconnected
-            isWaitingForCameraReady = false
-            cameraReadyPeers.removeAll()
-            addLog("No peers remaining – returning to search")
+            if persistentRole {
+                // 永続モード: 切断しても即リトライ、SEARCHING には戻さない
+                addLog("No peers – persistent mode, will retry connection")
+                resumeDiscoveryQuietly()
+            } else {
+                connectionState = .disconnected
+                isWaitingForCameraReady = false
+                cameraReadyPeers.removeAll()
+                addLog("No peers remaining – returning to search")
+            }
+        } else {
+            // ピアが残っている場合、advertiser/browser を再開する
+            resumeDiscoveryQuietly()
         }
         
+        #if DEBUG
         print("📹 [SessionManager] Cleaned up after preview – connection maintained")
+        #endif
         
         return wasMaster
     }
@@ -412,37 +820,60 @@ class CameraSessionManager: NSObject, ObservableObject {
             do {
                 try FileManager.default.removeItem(at: file)
                 deletedCount += 1
+                #if DEBUG
                 print("🗑️ [Cleanup] Deleted: \(file.lastPathComponent)")
+                #endif
             } catch {
+                #if DEBUG
                 print("❌ [Cleanup] Failed to delete \(file.lastPathComponent): \(error.localizedDescription)")
+                #endif
             }
         }
         recordedVideos.removeAll()
+        #if DEBUG
         print("🗑️ [Cleanup] Deleted \(deletedCount) file(s) from Documents/")
+        #endif
     }
     
     /// 特定のピアに接続招待を送る
     func invitePeer(_ peer: MCPeerID) {
         guard let browser = browser,
-              let session = session else {
+              let currentSession = session else {
             addLog("Skip invite: browser or session is nil")
             return
         }
         
-        // 既にConnectingまたは接続済みの場合はSkip
-        if connectedPeers.contains(peer) {
-            addLog("Skip: \(peer.displayName) already connected")
+        // 既に接続済み or CONNECTING 中はSkip
+        let peerName = peer.displayName
+        if connectedPeers.contains(where: { $0.displayName == peerName }) {
+            addLog("Skip: \(peerName) already connected")
             return
         }
+        if currentSession.connectedPeers.contains(where: { $0.displayName == peerName }) {
+            addLog("Skip: \(peerName) already in session.connectedPeers")
+            return
+        }
+        if isConnectingPeerFresh(peerName) {
+            addLog("Skip: \(peerName) already CONNECTING (fresh)")
+            return
+        }
+        // stale な CONNECTING をクリアして再招待
+        removeConnectingPeer(peerName)
         
-        // MCSessionの状態確認
-        let currentPeers = session.connectedPeers
-        print("📡 [Invite] Session peers before invite: \(currentPeers.map { $0.displayName })")
+        #if DEBUG
+        print("📡 [Invite] Session peers: \(currentSession.connectedPeers.map { $0.displayName })")
+        print("📡 [Invite] Session myPeerID: \(currentSession.myPeerID.displayName)")
+        print("📡 [Invite] Target peer: \(peer.displayName)")
+        #endif
         
+        // ★ invite 送信と同時に connectingPeerNames に追加（.connecting コールバックより先にガードを有効化）
+        addConnectingPeer(peerName)
+        // timeout を短くして早く失敗判定する（Connection refused は数秒で判明する）
+        // 長い timeout は MCSession 内部のリトライで帯域を占有し、相手からの incoming 招待と干渉する
         browser.invitePeer(peer,
-                          to: session,
+                          to: currentSession,
                           withContext: nil,
-                          timeout: 30)
+                          timeout: 10)
         
         addLog("Inviting: \(peer.displayName)")
     }
@@ -453,6 +884,10 @@ class CameraSessionManager: NSObject, ObservableObject {
     func startCameraForAll() {
         guard isMaster else {
             addLog("Only master can start camera")
+            return
+        }
+        guard !connectedPeers.isEmpty else {
+            addLog("No peers connected — cannot start camera")
             return
         }
         
@@ -476,13 +911,25 @@ class CameraSessionManager: NSObject, ObservableObject {
         // MCSessionチャンネルが確実に確立するまで待ってからコマンドを送信
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self else { return }
-            print("📷 [SessionManager] Sending start_camera commands to \(self.connectedPeers.count) peer(s)")
             
-            // スレーブが1台もいない場合は即座にカメラ準備完了
+            // 既に切断済みならカメラ起動フローを中止
+            guard self.connectionState != .disconnected else {
+                self.addLog("Camera start cancelled – already disconnected")
+                return
+            }
+            
+            #if DEBUG
+            print("📷 [SessionManager] Sending start_camera commands to \(self.connectedPeers.count) peer(s)")
+            #endif
+            
+            // スレーブが1台もいない場合はカメラを停止してメイン画面に戻る
             if self.connectedPeers.isEmpty {
                 self.isWaitingForCameraReady = false
-                self.isCameraReady = true
-                self.addLog("Camera ready (solo mode)")
+                self.isCameraReady = false
+                self.addLog("No peers connected — command 'start_camera' aborted")
+                self.addLog("Stopping camera and returning to menu")
+                self.cameraManager?.stopSession()
+                OrientationLock.isCameraActive = false
                 return
             }
             
@@ -525,6 +972,94 @@ class CameraSessionManager: NSObject, ObservableObject {
         addLog("Camera stopped")
     }
     
+    // MARK: - Multi-Monitor
+    
+    /// マルチモニター開始（マスターから全デバイスにスナップショット送信を指示）
+    func startMultiMonitor() {
+        isMultiMonitorActive = true
+        peerSnapshots.removeAll()
+        
+        // 自分のスナップショット取得を有効化
+        cameraManager?.isSnapshotEnabled = true
+        
+        // 全スレーブにマルチモニター開始コマンドを送信
+        let command: [String: Any] = ["action": "start_multi_monitor"]
+        sendCommandToAll(command)
+        
+        // 0.5秒間隔でスナップショットを送信するタイマーを開始
+        snapshotTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.sendSnapshotToPeers()
+        }
+        
+        addLog("Multi-monitor started")
+    }
+    
+    /// マルチモニター停止
+    func stopMultiMonitor() {
+        isMultiMonitorActive = false
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
+        peerSnapshots.removeAll()
+        
+        // 自分のスナップショット取得を無効化
+        cameraManager?.isSnapshotEnabled = false
+        
+        // 全スレーブにマルチモニター停止コマンドを送信
+        let command: [String: Any] = ["action": "stop_multi_monitor"]
+        sendCommandToAll(command)
+        
+        addLog("Multi-monitor stopped")
+    }
+    
+    /// 自分のスナップショットを全ピアに送信（バイナリプレフィックスプロトコル）
+    private func sendSnapshotToPeers() {
+        guard isMultiMonitorActive,
+              let session = session,
+              let jpegData = cameraManager?.latestSnapshot else { return }
+        
+        // 自分のスナップショットもpeerSnapshotsに登録
+        let myName = myPeerID.displayName
+        DispatchQueue.main.async {
+            self.peerSnapshots[myName] = jpegData
+        }
+        
+        // バイナリプレフィックス: 0x01 + deviceName(UTF8) + 0x00(null terminator) + JPEG data
+        var payload = Data([0x01])
+        payload.append(Data(myName.utf8))
+        payload.append(0x00) // null terminator
+        payload.append(jpegData)
+        
+        let peers = connectedPeers
+        guard !peers.isEmpty else { return }
+        
+        do {
+            try session.send(payload, toPeers: peers, with: .unreliable)
+        } catch {
+            // unreliable送信の失敗は無視（次のフレームで再送される）
+        }
+    }
+    
+    /// 受信したスナップショットバイナリを処理
+    private func handleReceivedSnapshot(_ data: Data) {
+        // フォーマット: 0x01 + deviceName(UTF8) + 0x00 + JPEG data
+        guard data.count > 2 else { return }
+        
+        // 先頭の0x01をスキップしてnull terminatorを探す
+        let payload = data.dropFirst() // 0x01をスキップ
+        guard let nullIndex = payload.firstIndex(of: 0x00) else { return }
+        
+        let nameData = payload[payload.startIndex..<nullIndex]
+        guard let deviceName = String(data: Data(nameData), encoding: .utf8) else { return }
+        
+        let jpegStart = payload.index(after: nullIndex)
+        guard jpegStart < payload.endIndex else { return }
+        let jpegData = Data(payload[jpegStart...])
+        
+        DispatchQueue.main.async {
+            self.peerSnapshots[deviceName] = jpegData
+        }
+    }
+    
     /// カメラ起動コマンドを送信（向き設定を含む）
     private func sendCameraStartCommand(to peer: MCPeerID) {
         let command: [String: Any] = [
@@ -550,8 +1085,9 @@ class CameraSessionManager: NSObject, ObservableObject {
     /// 全員からcamera_readyを受信したかチェック
     private func checkAllCamerasReady() {
         guard isWaitingForCameraReady else { return }
-        let expected = Set(connectedPeers)
-        guard !expected.isEmpty, expected.isSubset(of: cameraReadyPeers) else { return }
+        let expectedNames = Set(connectedPeers.map(\.displayName))
+        let readyNames = Set(cameraReadyPeers.map(\.displayName))
+        guard !expectedNames.isEmpty, expectedNames.isSubset(of: readyNames) else { return }
         
         isWaitingForCameraReady = false
         isCameraReady = true
@@ -623,9 +1159,10 @@ class CameraSessionManager: NSObject, ObservableObject {
     /// 全員 ready_ack を返したら fire（フェーズ2）
     private func fireRecordingIfAllReady() {
         guard isWaitingForReady else { return }
-        // 接続中の全ピアが ready_ack を返したか確認
-        let expected = Set(connectedPeers)
-        guard !expected.isEmpty, expected.isSubset(of: readyPeers) else { return }
+        // 接続中の全ピアが ready_ack を返したか確認（displayNameベース）
+        let expectedNames = Set(connectedPeers.map(\.displayName))
+        let ackNames = Set(readyPeers.map(\.displayName))
+        guard !expectedNames.isEmpty, expectedNames.isSubset(of: ackNames) else { return }
 
         isWaitingForReady = false
 
@@ -654,8 +1191,10 @@ class CameraSessionManager: NSObject, ObservableObject {
             return
         }
         
+        #if DEBUG
         print("📹 [SessionManager] stopRecordingAll called")
         print("📹 [SessionManager] Current SessionID: '\(sessionID)'")
+        #endif
         
         let command: [String: Any] = [
             "action": "stop_recording",
@@ -670,7 +1209,9 @@ class CameraSessionManager: NSObject, ObservableObject {
         handleStopRecording()
         
         // SessionIDはクリアしない（録画完了コールバックで使用するため）
+        #if DEBUG
         print("📹 [SessionManager] SessionID will be cleared after video transfer")
+        #endif
     }
     
     // MARK: - Private Methods
@@ -828,6 +1369,25 @@ class CameraSessionManager: NSObject, ObservableObject {
                 self.cameraManager?.stopSession()
                 self.isCameraReady = false
                 
+            case "start_multi_monitor":
+                // スレーブ: マルチモニター開始
+                self.addLog("start_multi_monitor received")
+                self.isMultiMonitorActive = true
+                self.cameraManager?.isSnapshotEnabled = true
+                // スレーブも0.5秒間隔でスナップショットを送信
+                self.snapshotTimer?.invalidate()
+                self.snapshotTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                    self?.sendSnapshotToPeers()
+                }
+                
+            case "stop_multi_monitor":
+                // スレーブ: マルチモニター停止
+                self.addLog("stop_multi_monitor received")
+                self.isMultiMonitorActive = false
+                self.snapshotTimer?.invalidate()
+                self.snapshotTimer = nil
+                self.cameraManager?.isSnapshotEnabled = false
+                
             default:
                 self.addLog("Unknown command: \(action)")
             }
@@ -855,8 +1415,10 @@ class CameraSessionManager: NSObject, ObservableObject {
         // 自動的にスレーブになる
         self.masterPeerID = masterPeerID
         isMaster = false
+        persistentRole = true
+        persistentMasterName = masterPeerName
         
-        addLog("Auto-assigned as Slave – Master: \(masterPeerName)")
+        addLog("Auto-assigned as Slave (persistent) – Master: \(masterPeerName)")
         addLog("Camera startup deferred to start_camera command")
     }
     
@@ -906,8 +1468,10 @@ class CameraSessionManager: NSObject, ObservableObject {
     
     /// Stopped処理
     private func handleStopRecording() {
+        #if DEBUG
         print("📹 [SessionManager] handleStopRecording called")
         print("📹 [SessionManager] Current SessionID: '\(sessionID)'")
+        #endif
         
         // カメラの録画を停止
         cameraManager?.stopRecording()
@@ -915,13 +1479,16 @@ class CameraSessionManager: NSObject, ObservableObject {
         addLog("Stopped")
         
         // SessionIDはクリアしない（録画完了コールバックで使用するため）
+        #if DEBUG
         print("📹 [SessionManager] Waiting for recording completion callback...")
+        #endif
     }
     
     // MARK: - Video Transfer
     
     /// Recording completion handler (public method)
     public func handleRecordingCompleted(videoURL: URL, sessionID: String) {
+        #if DEBUG
         print("📹 [SessionManager] ========== HANDLE RECORDING COMPLETED ==========")
         print("📹 [SessionManager] Called from: \(Thread.isMainThread ? "Main" : "Background") thread")
         print("📹 [SessionManager] SessionID: '\(sessionID)'")
@@ -929,18 +1496,23 @@ class CameraSessionManager: NSObject, ObservableObject {
         print("📹 [SessionManager] File path: \(videoURL.path)")
         print("📹 [SessionManager] File exists: \(FileManager.default.fileExists(atPath: videoURL.path))")
         print("📹 [SessionManager] Connected peers: \(connectedPeers.count)")
+        #endif
 
         // ✅ Stop camera when recording ends (transfer continues in background)
         cameraManager?.stopSession()
         addLog("Camera stopped – recording completed, starting transfer")
         
+        #if DEBUG
         if let fileSize = try? FileManager.default.attributesOfItem(atPath: videoURL.path)[.size] as? UInt64 {
             print("📹 [SessionManager] File size: \(fileSize) bytes")
         }
+        #endif
         
+        #if DEBUG
         for peer in connectedPeers {
             print("📹 [SessionManager]   - Peer: \(peer.displayName)")
         }
+        #endif
         
         addLog("Recording completed: \(videoURL.lastPathComponent)")
         
@@ -949,32 +1521,44 @@ class CameraSessionManager: NSObject, ObservableObject {
         let fileName = "\(sessionID)_\(myPeerID.displayName).mov"
         let destinationURL = documentsPath.appendingPathComponent(fileName)
         
+        #if DEBUG
         print("📹 [SessionManager] Copying to: \(destinationURL.path)")
+        #endif
         
         do {
             // Remove existing file if exists
             if FileManager.default.fileExists(atPath: destinationURL.path) {
                 try FileManager.default.removeItem(at: destinationURL)
+                #if DEBUG
                 print("📹 [SessionManager] Removed existing file")
+                #endif
             }
             
             // Copy file
             try FileManager.default.copyItem(at: videoURL, to: destinationURL)
+            #if DEBUG
             print("✅ [SessionManager] Copied successfully")
+            #endif
             
             // Record own video (save destination URL)
             let myDeviceName = myPeerID.displayName
             if recordedVideos[sessionID] == nil {
                 recordedVideos[sessionID] = [:]
+                #if DEBUG
                 print("📹 [SessionManager] Created new session entry")
+                #endif
             }
             recordedVideos[sessionID]?[myDeviceName] = destinationURL
             
+            #if DEBUG
             print("📹 [SessionManager] Stored own video for \(myDeviceName)")
             print("📹 [SessionManager] Current video count for session: \(recordedVideos[sessionID]?.count ?? 0)")
+            #endif
             
             // Send video to other devices (from original URL)
+            #if DEBUG
             print("📹 [SessionManager] Starting video transfer to peers...")
+            #endif
             sendVideoToAllPeers(videoURL: videoURL, sessionID: sessionID)
             
             // Check if all videos received
@@ -983,31 +1567,41 @@ class CameraSessionManager: NSObject, ObservableObject {
         } catch {
             let errorMsg = "Copy error: \(error.localizedDescription)"
             addLog(errorMsg)
+            #if DEBUG
             print("❌ [SessionManager] \(errorMsg)")
             print("❌ [SessionManager] Error details: \(error)")
+            #endif
         }
         
+        #if DEBUG
         print("📹 [SessionManager] =======================================================")
+        #endif
     }
     
     /// Send video file to all peers
     private func sendVideoToAllPeers(videoURL: URL, sessionID: String) {
         guard let session = session else {
+            #if DEBUG
             print("❌ [VideoTransfer] Session is nil")
+            #endif
             return
         }
         
         let fileName = "\(sessionID)_\(myPeerID.displayName).mov"
         
+        #if DEBUG
         print("📹 [VideoTransfer] ========== SENDING VIDEO ==========")
         print("📹 [VideoTransfer] Source: \(videoURL.path)")
         print("📹 [VideoTransfer] File exists: \(FileManager.default.fileExists(atPath: videoURL.path))")
         print("📹 [VideoTransfer] File name: \(fileName)")
         print("📹 [VideoTransfer] Peers count: \(connectedPeers.count)")
+        #endif
         
+        #if DEBUG
         if let fileSize = try? FileManager.default.attributesOfItem(atPath: videoURL.path)[.size] as? UInt64 {
             print("📹 [VideoTransfer] File size: \(fileSize) bytes (\(Double(fileSize) / 1_000_000.0) MB)")
         }
+        #endif
         
         DispatchQueue.main.async {
             self.isTransferring = true
@@ -1015,11 +1609,15 @@ class CameraSessionManager: NSObject, ObservableObject {
             let expectedCount = self.sessionExpectedCounts[sessionID] ?? (self.connectedPeers.count + 1)
             self.totalExpectedFiles = expectedCount
             self.receivedFiles = 1  // Own file
+            #if DEBUG
             print("📹 [VideoTransfer] Transfer state updated: \(self.receivedFiles)/\(self.totalExpectedFiles)")
+            #endif
         }
         
         for (index, peer) in connectedPeers.enumerated() {
+            #if DEBUG
             print("📹 [VideoTransfer] [\(index+1)/\(connectedPeers.count)] Sending to: \(peer.displayName)")
+            #endif
             
             // Use sendResource to transfer large files
             session.sendResource(at: videoURL,
@@ -1028,16 +1626,22 @@ class CameraSessionManager: NSObject, ObservableObject {
                 if let error = error {
                     let errorMsg = "Send failed to \(peer.displayName): \(error.localizedDescription)"
                     self.addLog(errorMsg)
+                    #if DEBUG
                     print("❌ [VideoTransfer] \(errorMsg)")
+                    #endif
                 } else {
                     let successMsg = "Sent to \(peer.displayName)"
                     self.addLog(successMsg)
+                    #if DEBUG
                     print("✅ [VideoTransfer] \(successMsg)")
+                    #endif
                 }
             }
         }
         
+        #if DEBUG
         print("📹 [VideoTransfer] ==========================================")
+        #endif
     }
     
     /// Check if all videos received
@@ -1052,6 +1656,7 @@ class CameraSessionManager: NSObject, ObservableObject {
             // Fall back to current connection count if no record in sessionExpectedCounts.
             let expectedCount = self.sessionExpectedCounts[sessionID] ?? (self.connectedPeers.count + 1)
 
+            #if DEBUG
             print("📹 [VideoCheck] Session: \(sessionID)")
             print("📹 [VideoCheck] Expected: \(expectedCount), Got: \(videos.count)")
             print("📹 [VideoCheck] Videos: \(videos.keys.joined(separator: ", "))")
@@ -1060,6 +1665,7 @@ class CameraSessionManager: NSObject, ObservableObject {
                 let exists = FileManager.default.fileExists(atPath: url.path)
                 print("📹 [VideoCheck] \(device): \(exists ? "✅" : "❌") \(url.path)")
             }
+            #endif
 
             if videos.count == expectedCount {
                 self.addLog("All videos received for session: \(sessionID)")
@@ -1076,7 +1682,9 @@ class CameraSessionManager: NSObject, ObservableObject {
                 // Set preview data
                 self.previewSessionID = sessionID
                 self.previewVideos = videos
+                #if DEBUG
                 print("📹 [VideoCheck] Showing preview with \(videos.count) videos")
+                #endif
 
                 // Stop advertiser/browser only to prevent new connections
                 self.advertiser?.stopAdvertisingPeer()
@@ -1095,87 +1703,152 @@ class CameraSessionManager: NSObject, ObservableObject {
 extension CameraSessionManager: MCSessionDelegate {
     /// Peer connection state change
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
-        DispatchQueue.main.async {
-            print("🔍 [MCSession] State change for \(peerID.displayName): \(state.rawValue)")
+        // ★ MCSession デリゲートキュー（バックグラウンド）で即座に処理する
+        // DispatchQueue.main.async に包むと、メインスレッドがデバッガー等でハングしている間に
+        // MCSession 内部のハンドシェイクがタイムアウトして Connection refused になる
+        let peerName = peerID.displayName
+        
+        #if DEBUG
+        print("🔍 [MCSession] State change for \(peerName): \(state.rawValue)")
+        #endif
+        
+        switch state {
+        case .connected:
+            #if DEBUG
+            print("✅ [MCSession] CONNECTED to \(peerName)")
+            #endif
+            removeConnectingPeer(peerName)
             
-            switch state {
-            case .connected:
-                print("✅ [MCSession] CONNECTED to \(peerID.displayName)")
-                if !self.connectedPeers.contains(peerID) {
+            // ★ 接続確立時刻を記録（Hang 切断耐性用）— スレッドセーフ
+            setConnectionTimestamp(peerName)
+            
+            // UI更新はメインスレッドで
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if !self.connectedPeers.contains(where: { $0.displayName == peerName }) {
                     self.connectedPeers.append(peerID)
                 }
                 self.connectionState = .connected
-                self.addLog("Connected: \(peerID.displayName)")
+                self.addLog("Connected: \(peerName)")
+                
+                // ★ 接続成功 → outgoing 失敗カウンタをリセット
+                self.consecutiveOutgoingFailures = 0
                 
                 // リトライカウンタをクリア
-                let peerName = peerID.displayName
                 self.retryCounts.removeValue(forKey: peerName)
                 self.retryWorkItems[peerName]?.cancel()
                 self.retryWorkItems.removeValue(forKey: peerName)
+                if self.retryCounts.isEmpty { self.isRetrying = false }
                 
                 // マスターであれば新しく接続したピアに宣言を送る
                 self.announceMasterRoleIfNeeded(to: peerID)
                 
-            case .connecting:
-                print("🔄 [MCSession] CONNECTING to \(peerID.displayName)")
+                // ★ 永続モード: スレーブ側で再接続したマスターを認識
+                if self.persistentRole && !self.isMaster {
+                    if peerName == self.persistentMasterName {
+                        self.masterPeerID = peerID
+                        self.addLog("Reconnected to persistent master: \(peerName)")
+                    }
+                }
+                
+                // ★ 永続モード: マスターが既にカメラ起動済みなら、再接続したスレーブに start_camera を送る
+                if self.persistentRole && self.isMaster && self.isCameraReady {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        guard let self,
+                              self.connectedPeers.contains(where: { $0.displayName == peerName }) else { return }
+                        self.sendCameraStartCommand(to: peerID)
+                        self.addLog("Resent start_camera to reconnected peer: \(peerName)")
+                    }
+                }
+            }
+            
+        case .connecting:
+            #if DEBUG
+            print("🔄 [MCSession] CONNECTING to \(peerName)")
+            #endif
+            addConnectingPeer(peerName)
+            
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.connectionState = .connecting
-                self.addLog("Connecting: \(peerID.displayName)")
+                self.addLog("Connecting: \(peerName)")
                 
                 // 接続中になったらリトライをキャンセル
-                let connectingName = peerID.displayName
-                self.retryWorkItems[connectingName]?.cancel()
-                self.retryWorkItems.removeValue(forKey: connectingName)
-                
-            case .notConnected:
-                print("❌ [MCSession] NOT CONNECTED to \(peerID.displayName)")
-                self.connectedPeers.removeAll { $0 == peerID }
-                self.addLog("Disconnected: \(peerID.displayName)")
-
-                // Don't reset during recording/transfer/waiting/preview transition/preview display
-                // (MultipeerConnectivity may briefly fire notConnected during recording or right after transfer completion)
-                let isActive = (self.cameraManager?.isRecording == true)
-                    || self.isTransferring
-                    || self.isWaitingForReady
-                    || self.isTransitioningToPreview  // Between all videos received ~ showPreview=true
-                    || self.showPreview               // During preview display
-
-                if self.connectedPeers.isEmpty && !isActive {
-                    self.connectionState = .disconnected
-                    self.sessionID = ""
-                    
-                    // カメラ起動状態をリセット
-                    self.isWaitingForCameraReady = false
-                    self.isCameraReady = false
-                    self.cameraReadyPeers.removeAll()
-                    
-                    // ★ マスターが切断された場合、スレーブの役割をリセット
-                    // → SEARCHING状態に戻す（AWAIT緑のまま残らないようにする）
-                    if !self.isMaster && self.masterPeerID != nil {
-                        self.masterPeerID = nil
-                        self.addLog("Master disconnected – returning to search")
-                    } else {
-                        self.addLog("Disconnected – will retry connection")
-                    }
-                } else {
-                    // まだ他のピアが接続されている、または録画中
-                    self.addLog("Still have \(self.connectedPeers.count) peer(s) connected")
-                }
-                
-                // ★ 接続失敗時にセッション再作成＋再招待を試みる（アクティブ時以外）
-                if !isActive {
-                    self.scheduleRetryConnection(for: peerID)
-                }
-                
-            @unknown default:
-                print("⚠️ [MCSession] Unknown state for \(peerID.displayName)")
-                break
+                self.retryWorkItems[peerName]?.cancel()
+                self.retryWorkItems.removeValue(forKey: peerName)
             }
+            
+        case .notConnected:
+            #if DEBUG
+            print("❌ [MCSession] NOT CONNECTED to \(peerName)")
+            #endif
+            
+            // ★ MCSession の実際の connectedPeers を確認して、偽の切断通知を無視する
+            if let currentSession = self.session,
+               currentSession.connectedPeers.contains(where: { $0.displayName == peerName }) {
+                self.addLog("Ignoring false disconnect for \(peerName) – still in session.connectedPeers")
+                #if DEBUG
+                print("⚠️ [MCSession] False disconnect ignored for \(peerName)")
+                #endif
+                return
+            }
+            
+            // ★ 接続確立直後の切断を無視（デバッガ Hang によるキープアライブ途切れ対策）
+            // connectionGracePeriod 以内の切断は、MCSession 内部の一時的な不安定として扱い、
+            // 即座にリトライせず数秒待ってから再確認する
+            let connectedAt = getConnectionTimestamp(peerName)
+            if let ts = connectedAt, Date().timeIntervalSince(ts) < connectionGracePeriod {
+                let elapsed = String(format: "%.1f", Date().timeIntervalSince(ts))
+                DispatchQueue.main.async { [weak self] in
+                    self?.addLog("Grace period: disconnect \(peerName) after \(elapsed)s – will re-check in 5s")
+                }
+                // 5秒後に本当に切断されているか再確認
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                    guard let self else { return }
+                    if let s = self.session,
+                       s.connectedPeers.contains(where: { $0.displayName == peerName }) {
+                        self.addLog("Grace re-check: \(peerName) is still connected – ignoring")
+                    } else if self.connectedPeers.contains(where: { $0.displayName == peerName }) {
+                        // ローカルでは接続中だが MCSession では切断 → 本当の切断
+                        self.addLog("Grace re-check: \(peerName) confirmed disconnected")
+                        self.removeConnectionTimestamp(peerName)
+                        self.connectedPeers.removeAll { $0.displayName == peerName }
+                        self.handleConfirmedDisconnect(peerName: peerName, peerID: peerID)
+                    }
+                }
+                return
+            }
+            
+            removeConnectingPeer(peerName)
+            removeConnectionTimestamp(peerName)
+            
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                // ★ outgoing 招待の失敗をカウント（passive モード判定用）
+                self.consecutiveOutgoingFailures += 1
+                if self.consecutiveOutgoingFailures >= self.passiveModeThreshold {
+                    self.addLog("Passive mode: \(self.consecutiveOutgoingFailures) consecutive failures – will only accept incoming invites")
+                }
+                self.connectedPeers.removeAll { $0.displayName == peerName }
+                self.handleConfirmedDisconnect(peerName: peerName, peerID: peerID)
+            }
+            
+        @unknown default:
+            #if DEBUG
+            print("⚠️ [MCSession] Unknown state for \(peerName)")
+            #endif
+            break
         }
     }
     
     /// Data received
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        handleReceivedCommand(data, from: peerID)
+        // バイナリプレフィックスで分岐: 0x01 = スナップショット, それ以外 = JSONコマンド
+        if let firstByte = data.first, firstByte == 0x01 {
+            handleReceivedSnapshot(data)
+        } else {
+            handleReceivedCommand(data, from: peerID)
+        }
     }
     
     /// Stream received (not used)
@@ -1190,29 +1863,37 @@ extension CameraSessionManager: MCSessionDelegate {
     
     /// Resource receive completed
     func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {
+        #if DEBUG
         print("📹 [VideoReceive] ========== RECEIVED RESOURCE ==========")
         print("📹 [VideoReceive] From: \(peerID.displayName)")
         print("📹 [VideoReceive] Resource name: \(resourceName)")
         print("📹 [VideoReceive] Local URL: \(localURL?.path ?? "nil")")
+        #endif
         
         if let error = error {
             let errorMsg = "Receive error: \(error.localizedDescription)"
             addLog(errorMsg)
+            #if DEBUG
             print("❌ [VideoReceive] \(errorMsg)")
+            #endif
             return
         }
         
         guard let localURL = localURL else {
             addLog("No URL received")
+            #if DEBUG
             print("❌ [VideoReceive] localURL is nil")
+            #endif
             return
         }
         
+        #if DEBUG
         print("📹 [VideoReceive] File exists at localURL: \(FileManager.default.fileExists(atPath: localURL.path))")
         
         if let fileSize = try? FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? UInt64 {
             print("📹 [VideoReceive] File size: \(fileSize) bytes (\(Double(fileSize) / 1_000_000.0) MB)")
         }
+        #endif
         
         // Extract SessionID and device name from filename
         // Filename format: SessionID_DeviceName.mov
@@ -1221,70 +1902,89 @@ extension CameraSessionManager: MCSessionDelegate {
         
         guard components.count >= 2 else {
             addLog("Invalid filename format: \(resourceName)")
+            #if DEBUG
             print("❌ [VideoReceive] Invalid filename format")
+            #endif
             return
         }
         
         let sessionID = String(components[0])
         let deviceName = components.dropFirst().joined(separator: "_")
         
+        #if DEBUG
         print("📹 [VideoReceive] Extracted SessionID: '\(sessionID)'")
         print("📹 [VideoReceive] Extracted DeviceName: '\(deviceName)'")
+        #endif
         
-        // Copy to persistent location
+        // ★ ファイル I/O を専用キューで実行し、MCSession の内部デリゲートキューをブロックしない
+        // デリゲートキューが詰まるとキープアライブが途切れて接続が切断される
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let destinationURL = documentsPath.appendingPathComponent(resourceName)
         
-        print("📹 [VideoReceive] Copying to: \(destinationURL.path)")
-        
-        do {
-            // Remove existing file if exists
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
-                print("📹 [VideoReceive] Removed existing file")
-            }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
             
-            // Copy file
-            try FileManager.default.copyItem(at: localURL, to: destinationURL)
+            #if DEBUG
+            print("📹 [VideoReceive] Moving to: \(destinationURL.path)")
+            #endif
             
-            addLog("Received: \(resourceName)")
-            print("✅ [VideoReceive] File copied successfully")
-            
-            // Record received video, update count, check if all received - all on main thread
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-
-                // ★ Failsafe: If still recording when master video arrives, force stop
-                // (Countermeasure for when stop_recording command wasn't received due to network instability)
-                if self.cameraManager?.isRecording == true && !self.isMaster {
-                    print("⚠️ [VideoReceive] Received master video but still recording – force stopping")
-                    self.addLog("Force stop: stop_recording was not received in time")
-                    self.handleStopRecording()
+            do {
+                // Remove existing file if exists
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    try FileManager.default.removeItem(at: destinationURL)
                 }
+                
+                // ★ copyItem → moveItem に変更（同一ボリューム内はほぼ瞬時）
+                try FileManager.default.moveItem(at: localURL, to: destinationURL)
+                
+                self.addLog("Received: \(resourceName)")
+                #if DEBUG
+                print("✅ [VideoReceive] File moved successfully")
+                #endif
+                
+                // Record received video, update count, check if all received - on main thread
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
 
-                if self.recordedVideos[sessionID] == nil {
-                    self.recordedVideos[sessionID] = [:]
-                    print("📹 [VideoReceive] Created new session entry for: \(sessionID)")
+                    // ★ Failsafe: If still recording when master video arrives, force stop
+                    if self.cameraManager?.isRecording == true && !self.isMaster {
+                        #if DEBUG
+                        print("⚠️ [VideoReceive] Received master video but still recording – force stopping")
+                        #endif
+                        self.addLog("Force stop: stop_recording was not received in time")
+                        self.handleStopRecording()
+                    }
+
+                    if self.recordedVideos[sessionID] == nil {
+                        self.recordedVideos[sessionID] = [:]
+                    }
+                    self.recordedVideos[sessionID]?[deviceName] = destinationURL
+
+                    #if DEBUG
+                    print("📹 [VideoReceive] Stored video for device: \(deviceName)")
+                    print("📹 [VideoReceive] Current video count: \(self.recordedVideos[sessionID]?.count ?? 0)")
+                    #endif
+
+                    self.receivedFiles += 1
+                    #if DEBUG
+                    print("📹 [VideoReceive] Updated received count: \(self.receivedFiles)/\(self.totalExpectedFiles)")
+                    #endif
+
+                    self.checkAllVideosReceived(sessionID: sessionID)
                 }
-                self.recordedVideos[sessionID]?[deviceName] = destinationURL
-
-                print("📹 [VideoReceive] Stored video for device: \(deviceName)")
-                print("📹 [VideoReceive] Current video count: \(self.recordedVideos[sessionID]?.count ?? 0)")
-
-                self.receivedFiles += 1
-                print("📹 [VideoReceive] Updated received count: \(self.receivedFiles)/\(self.totalExpectedFiles)")
-
-                // Check if all videos received (already on main thread so call directly)
-                self.checkAllVideosReceived(sessionID: sessionID)
+                
+            } catch {
+                let errorMsg = "Save error: \(error.localizedDescription)"
+                self.addLog(errorMsg)
+                #if DEBUG
+                print("❌ [VideoReceive] \(errorMsg)")
+                #endif
             }
-            
-        } catch {
-            let errorMsg = "Save error: \(error.localizedDescription)"
-            addLog(errorMsg)
-            print("❌ [VideoReceive] \(errorMsg)")
         }
         
+        #if DEBUG
         print("📹 [VideoReceive] ==========================================")
+        #endif
     }
 }
 
@@ -1293,20 +1993,36 @@ extension CameraSessionManager: MCSessionDelegate {
 extension CameraSessionManager: MCNearbyServiceAdvertiserDelegate {
     /// When invitation received
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
+        // ★ MCSession のデリゲートキュー（バックグラウンド）で即座に処理する
+        // メインスレッドへの dispatch を挟むと、Hang 中に invitationHandler の応答が遅れ、
+        // 相手側の接続試行がタイムアウトする
+        let peerName = peerID.displayName
         
-        addLog("Invitation from \(peerID.displayName)")
+        addLog("Invitation from \(peerName)")
         
-        // Reject if already connected
-        if connectedPeers.contains(peerID) {
-            addLog("Rejected: \(peerID.displayName) already connected")
+        // セッションが nil なら拒否（fullRestart の途中で届いた古い招待）
+        guard let currentSession = session else {
+            addLog("Rejected: session is nil (restarting)")
             invitationHandler(false, nil)
             return
         }
         
-        // ★ 名前の辞書順で大きい方だけが招待を送るルールなので、
-        // ここに来る＝相手が招待者（名前が大きい方）。素直に受諾する。
-        invitationHandler(true, session)
-        addLog("Accepted: \(peerID.displayName)")
+        // ★ MCSession の内部状態で接続済みチェック（スレッドセーフ）
+        if currentSession.connectedPeers.contains(where: { $0.displayName == peerName }) {
+            addLog("Rejected: \(peerName) already in session.connectedPeers")
+            invitationHandler(false, nil)
+            return
+        }
+        
+        // ★ CONNECTING チェックを廃止:
+        // 自分からの outgoing invite が CONNECTING 状態でも、相手からの incoming invite を受け入れる。
+        // Connection refused で outgoing が失敗しても、incoming は成功する可能性が高い。
+        // MCSession は内部で重複接続を処理するため、両方 accept しても問題ない。
+        
+        // ★ accept と同時に connectingPeerNames に追加（スレッドセーフ）
+        addConnectingPeer(peerName)
+        invitationHandler(true, currentSession)
+        addLog("Accepted: \(peerName)")
     }
     
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
@@ -1320,28 +2036,74 @@ extension CameraSessionManager: MCNearbyServiceBrowserDelegate {
     /// When peer discovered
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
         DispatchQueue.main.async {
-            if !self.availablePeers.contains(peerID) && peerID != self.myPeerID {
-                self.availablePeers.append(peerID)
-                self.addLog("Found: \(peerID.displayName)")
-                
-                // ★ 名前の辞書順で大きい方だけが招待を送る（衝突回避）
-                // 小さい方は advertiser 経由で招待を待つ
-                guard self.myPeerID.displayName > peerID.displayName else {
-                    self.addLog("Waiting for invitation from \(peerID.displayName) (lower priority)")
+            let peerName = peerID.displayName
+            
+            // displayName ベースで重複チェック（MCPeerID はインスタンスが毎回異なるため参照比較は無効）
+            let alreadyKnown = self.availablePeers.contains(where: { $0.displayName == peerName })
+            guard !alreadyKnown && peerName != self.myPeerID.displayName else { return }
+            
+            self.availablePeers.append(peerID)
+            
+            // ★ 相手の discoveryInfo からスコアを取得・保存
+            let peerScore = Int(info?["score"] ?? "") ?? 0
+            self.peerScores[peerName] = peerScore
+            self.addLog("Found: \(peerName) (score=\(peerScore), mine=\(self.deviceScore))")
+            
+            // 両方が招待を送る方式
+            let alreadyConnected = self.connectedPeers.contains(where: { $0.displayName == peerName })
+            guard !alreadyConnected else { return }
+            
+            let alreadyInvited = self.invitedPeerNames.contains(peerName)
+            guard !alreadyInvited else { return }
+            self.invitedPeerNames.insert(peerName)
+            
+            // ★ 招待戦略: スコアが高い方が initiator（招待を送る側）
+            // スペックの高い端末のリスンソケットに接続しに行く方が Connection refused が起きにくい
+            //
+            // Passive mode: 連続で outgoing が失敗したら自分からは送らない（受け身に徹する）
+            if self.consecutiveOutgoingFailures >= self.passiveModeThreshold {
+                self.addLog("Passive mode: waiting for \(peerName) to invite us")
+                return
+            }
+            
+            // ★ スコア比較: 自分のスコアが低い場合は相手からの招待を待つ（responder）
+            // 同スコアの場合は displayName の辞書順で決定（名前が大きい方が initiator）
+            let iAmInitiator: Bool
+            if self.deviceScore != peerScore {
+                iAmInitiator = self.deviceScore > peerScore
+            } else {
+                iAmInitiator = self.myPeerID.displayName > peerName
+            }
+            
+            if !iAmInitiator {
+                self.addLog("Lower score – waiting for \(peerName) to invite us")
+                // ただし、相手からの招待が来なかった場合のフォールバック
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+                    guard let self else { return }
+                    guard !self.connectedPeers.contains(where: { $0.displayName == peerName }) else { return }
+                    if let s = self.session, s.connectedPeers.contains(where: { $0.displayName == peerName }) { return }
+                    guard self.consecutiveOutgoingFailures < self.passiveModeThreshold else { return }
+                    self.addLog("Fallback: no invite from \(peerName) after 8s – sending our own")
+                    self.invitePeer(peerID)
+                }
+                return
+            }
+            
+            // リトライ中（isRetrying）は既に相手がいることがわかっているので待機を短縮
+            let delay: Double = self.isRetrying
+                ? Double.random(in: 2.0...3.0)   // リトライ時: 短め
+                : Double.random(in: 3.0...5.0)    // 初回: 少し待ってから送信（スコア高い側）
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                guard !self.connectedPeers.contains(where: { $0.displayName == peerName }) else { return }
+                if let s = self.session, s.connectedPeers.contains(where: { $0.displayName == peerName }) { return }
+                guard !self.isConnectingPeerFresh(peerName) else {
+                    self.addLog("Skip invite: \(peerName) already CONNECTING (fresh)")
                     return
                 }
-                
-                // Invite only if not already invited or connected
-                if !self.invitedPeers.contains(peerID) && !self.connectedPeers.contains(peerID) {
-                    self.invitedPeers.insert(peerID)
-                    // ★ 少し遅延を入れて相手のadvertiserが安定してから招待
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        guard let self else { return }
-                        // まだ接続されていなければ招待を送る
-                        guard !self.connectedPeers.contains(peerID) else { return }
-                        self.invitePeer(peerID)
-                    }
-                }
+                self.removeConnectingPeer(peerName)
+                self.addLog("No invitation received from \(peerName) – sending our own")
+                self.invitePeer(peerID)
             }
         }
     }
@@ -1349,8 +2111,10 @@ extension CameraSessionManager: MCNearbyServiceBrowserDelegate {
     /// When peer lost
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         DispatchQueue.main.async {
-            self.availablePeers.removeAll { $0 == peerID }
-            self.addLog("Peer lost: \(peerID.displayName)")
+            let peerName = peerID.displayName
+            self.availablePeers.removeAll { $0.displayName == peerName }
+            self.invitedPeerNames.remove(peerName)
+            self.addLog("Peer lost: \(peerName)")
         }
     }
     

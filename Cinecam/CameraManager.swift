@@ -8,6 +8,7 @@
 import Foundation
 import AVFoundation
 import UIKit
+import CoreImage
 // Photos framework は不要（カメラロールへの保存は CinecamExportEngine で行う）
 import Combine
 
@@ -56,6 +57,10 @@ class CameraManager: NSObject, ObservableObject {
         didSet { updateZoomFactor() }
     }
     @Published var torchMode: AVCaptureDevice.TorchMode = .off
+    /// 現在のカメラデバイスがトーチ（撮影ライト）を搭載しているか
+    var hasTorch: Bool {
+        currentCamera?.hasTorch == true
+    }
     @Published var exposureBias: Float = 0.0  // 露出補正値
     
     // 録画設定
@@ -64,12 +69,31 @@ class CameraManager: NSObject, ObservableObject {
     @Published var videoCodec: AVVideoCodecType = .hevc  // .h264, .hevc, .proRes422, .proRes4444
     
     private var captureSession: AVCaptureSession?
+    
+    /// カメラセッションが実行中かどうか
+    var isCameraSessionRunning: Bool {
+        captureSession?.isRunning == true
+    }
     private var videoOutput: AVCaptureMovieFileOutput?
     private var currentVideoURL: URL?
     private var recordingStartTime: Date?
     private var timer: Timer?
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
+    
+    // MARK: - Snapshot (Multi-Monitor)
+    private var snapshotOutput: AVCaptureVideoDataOutput?
+    private let snapshotQueue = DispatchQueue(label: "com.cinecam.snapshot", qos: .utility)
+    /// CIContext はコストが高いので使い回す
+    private lazy var snapshotCIContext = CIContext(options: [.useSoftwareRenderer: false])
+    /// 最新スナップショット（JPEG Data） — メインスレッドから読み書きする
+    @Published var latestSnapshot: Data?
+    /// スナップショット取得を有効にするフラグ
+    var isSnapshotEnabled = false
+    /// フレーム間引き：最後にスナップショットを処理した時刻
+    private var lastSnapshotTime: CFAbsoluteTime = 0
+    /// スナップショットの最小処理間隔（秒）
+    private let snapshotInterval: CFTimeInterval = 0.4
 
     // AVCaptureSession 専用の直列キュー。
     // global(qos:) を使うと MCSession の内部処理と同じスレッドプールを奪い合い、
@@ -120,6 +144,11 @@ class CameraManager: NSObject, ObservableObject {
                connection.isVideoOrientationSupported {
                 connection.videoOrientation = orientation
             }
+            // スナップショット接続
+            if let snapConn = self.snapshotOutput?.connection(with: .video),
+               snapConn.isVideoOrientationSupported {
+                snapConn.videoOrientation = orientation
+            }
             // プレビュー接続
             DispatchQueue.main.async {
                 if let previewConnection = self.previewLayer?.connection,
@@ -140,20 +169,35 @@ class CameraManager: NSObject, ObservableObject {
     
     /// カメラのセットアップと起動
     func setupCamera() {
+        #if DEBUG
         print("🎥 [CameraManager] setupCamera() called")
+        #endif
         // Preview 環境では実セッションを起動しない
         if PreviewDetection.isRunningForPreviews {
+            #if DEBUG
             print("🧪 [CameraManager] Running in Preview – skipping camera setup")
+            #endif
+            return
+        }
+        // 既にセッションが起動済みならスキップ（2重セットアップ防止）
+        if let session = captureSession, session.isRunning {
+            #if DEBUG
+            print("⚠️ [CameraManager] Session already running – skipping setup")
+            #endif
             return
         }
         checkCameraPermission { [weak self] granted in
+            #if DEBUG
             print("🎥 [CameraManager] Permission granted: \(granted)")
+            #endif
             if granted {
                 // カメラを設定して起動する
                 self?.configureCaptureSession(thenStart: true)
             } else {
                 self?.error = "カメラの使用が許可されていません"
+                #if DEBUG
                 print("❌ [CameraManager] Camera permission denied")
+                #endif
             }
         }
     }
@@ -162,7 +206,9 @@ class CameraManager: NSObject, ObservableObject {
     func startSession(completion: @escaping () -> Void) {
         // Preview 環境ではセッションを起動しない
         if PreviewDetection.isRunningForPreviews {
+            #if DEBUG
             print("🧪 [CameraManager] Running in Preview – skipping startSession")
+            #endif
             completion()
             return
         }
@@ -180,7 +226,9 @@ class CameraManager: NSObject, ObservableObject {
         }
         sessionQueue.async {
             session.startRunning()
+            #if DEBUG
             print("🎥 カメラセッション開始")
+            #endif
             DispatchQueue.main.async { completion() }
         }
     }
@@ -208,10 +256,14 @@ class CameraManager: NSObject, ObservableObject {
     
     /// キャプチャセッションの設定
     private func configureCaptureSession(thenStart: Bool = false, completion: (() -> Void)? = nil) {
+        #if DEBUG
         print("🎥 [CameraManager] configureCaptureSession called, thenStart: \(thenStart)")
+        #endif
         // Preview 環境では実セッションを構成しない
         if PreviewDetection.isRunningForPreviews {
+            #if DEBUG
             print("🧪 [CameraManager] Running in Preview – skipping configureCaptureSession")
+            #endif
             DispatchQueue.main.async {
                 self.captureSession = nil
                 self.videoOutput = nil
@@ -229,28 +281,38 @@ class CameraManager: NSObject, ObservableObject {
         // global(qos: .userInitiated) を使うと MCSession の内部処理と
         // スレッドプールを奪い合い、startRunning() の長時間ブロック（数秒）が
         // MCSession のタイムアウト切断を引き起こす。
+        // ★ UIKit API はメインスレッドでのみ呼べるので、事前に取得しておく
+        let capturedOrientation = CameraManager.currentCaptureOrientation()
         sessionQueue.async { [weak self] in
             guard let self else { return }
 
+            #if DEBUG
             print("🎥 [CameraManager] Creating AVCaptureSession...")
+            #endif
             let session = AVCaptureSession()
             session.beginConfiguration()
             session.sessionPreset = self.videoResolution
 
             guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+                #if DEBUG
                 print("❌ [CameraManager] Camera not found")
+                #endif
                 DispatchQueue.main.async { self.error = "カメラが見つかりません" }
                 return
             }
 
+            #if DEBUG
             print("🎥 [CameraManager] Camera found: \(camera.localizedName)")
+            #endif
 
             do {
                 let videoInput = try AVCaptureDeviceInput(device: camera)
                 if session.canAddInput(videoInput) { 
                     session.addInput(videoInput)
                     self.videoInput = videoInput
+                    #if DEBUG
                     print("✅ [CameraManager] Video input added")
+                    #endif
                 }
 
                 if let audioDevice = AVCaptureDevice.default(for: .audio) {
@@ -258,16 +320,21 @@ class CameraManager: NSObject, ObservableObject {
                     if session.canAddInput(audioInput) { 
                         session.addInput(audioInput)
                         self.audioInput = audioInput
+                        #if DEBUG
                         print("✅ [CameraManager] Audio input added")
+                        #endif
                     }
                 }
 
                 let output = AVCaptureMovieFileOutput()
                 
                 // コーデック設定
-                if output.availableVideoCodecTypes.contains(self.videoCodec) {
-                    output.setOutputSettings([AVVideoCodecKey: self.videoCodec], for: output.connection(with: .video)!)
+                if output.availableVideoCodecTypes.contains(self.videoCodec),
+                   let videoConnection = output.connection(with: .video) {
+                    output.setOutputSettings([AVVideoCodecKey: self.videoCodec], for: videoConnection)
+                    #if DEBUG
                     print("✅ [CameraManager] Video codec set to: \(self.videoCodec.rawValue)")
+                    #endif
                 }
                 
                 if session.canAddOutput(output) {
@@ -275,19 +342,39 @@ class CameraManager: NSObject, ObservableObject {
                     if let connection = output.connection(with: .video),
                        connection.isVideoOrientationSupported {
                         // 端末の現在の向きに合わせて録画する
-                        connection.videoOrientation = CameraManager.currentCaptureOrientation()
+                        connection.videoOrientation = capturedOrientation
                     }
+                    #if DEBUG
                     print("✅ [CameraManager] Video output added")
+                    #endif
+                }
+                
+                // スナップショット用 VideoDataOutput
+                let snapOutput = AVCaptureVideoDataOutput()
+                snapOutput.alwaysDiscardsLateVideoFrames = true
+                snapOutput.setSampleBufferDelegate(self, queue: self.snapshotQueue)
+                if session.canAddOutput(snapOutput) {
+                    session.addOutput(snapOutput)
+                    if let snapConn = snapOutput.connection(with: .video),
+                       snapConn.isVideoOrientationSupported {
+                        snapConn.videoOrientation = capturedOrientation
+                    }
+                    self.snapshotOutput = snapOutput
+                    #if DEBUG
+                    print("✅ [CameraManager] Snapshot output added")
+                    #endif
                 }
 
                 session.commitConfiguration()
+                #if DEBUG
                 print("✅ [CameraManager] Session configuration committed")
+                #endif
 
                 let preview = AVCaptureVideoPreviewLayer(session: session)
                 preview.videoGravity = .resizeAspectFill
                 if preview.connection?.isVideoOrientationSupported == true {
                     // 端末の現在の向きに合わせる
-                    preview.connection?.videoOrientation = CameraManager.currentCaptureOrientation()
+                    preview.connection?.videoOrientation = capturedOrientation
                 }
 
                 // UI 更新だけメインスレッドへ
@@ -296,7 +383,9 @@ class CameraManager: NSObject, ObservableObject {
                     self.videoOutput = output
                     self.previewLayer = preview
                     self.currentCamera = camera
+                    #if DEBUG
                     print("✅ [CameraManager] previewLayer set on main thread")
+                    #endif
                 }
                 
                 // 初期設定を適用
@@ -304,18 +393,26 @@ class CameraManager: NSObject, ObservableObject {
 
                 if thenStart {
                     // startRunning() は同じ sessionQueue で同期実行（ブロックするがキューは専用なので安全）
+                    #if DEBUG
                     print("🎥 [CameraManager] Starting camera session...")
+                    #endif
                     session.startRunning()
+                    #if DEBUG
                     print("✅ [CameraManager] Camera session started, isRunning: \(session.isRunning)")
+                    #endif
                     DispatchQueue.main.async {
                         completion?()
                     }
                 } else {
+                    #if DEBUG
                     print("⚠️ [CameraManager] Session configured but NOT started (thenStart=false)")
+                    #endif
                 }
 
             } catch {
+                #if DEBUG
                 print("❌ [CameraManager] Configuration error: \(error.localizedDescription)")
+                #endif
                 DispatchQueue.main.async {
                     self.error = "カメラの設定に失敗しました: \(error.localizedDescription)"
                 }
@@ -327,6 +424,7 @@ class CameraManager: NSObject, ObservableObject {
     
     /// カメラを切り替え
     func switchCamera(to camera: AVCaptureDevice) {
+        let capturedOrientation = CameraManager.currentCaptureOrientation()
         sessionQueue.async { [weak self] in
             guard let self,
                   let session = self.captureSession,
@@ -343,14 +441,18 @@ class CameraManager: NSObject, ObservableObject {
                 // バックカメラに戻す時など、ユーザー設定のプリセットに復帰
                 if session.sessionPreset != self.videoResolution {
                     session.sessionPreset = self.videoResolution
+                    #if DEBUG
                     print("✅ [CameraManager] Preset restored to \(self.videoResolution.rawValue)")
+                    #endif
                 }
             } else {
                 let fallbacks: [AVCaptureSession.Preset] = [.hd1920x1080, .hd1280x720, .high]
                 for preset in fallbacks {
                     if camera.supportsSessionPreset(preset) {
                         session.sessionPreset = preset
+                        #if DEBUG
                         print("⚠️ [CameraManager] Preset downgraded to \(preset.rawValue) for \(camera.localizedName)")
+                        #endif
                         break
                     }
                 }
@@ -365,7 +467,12 @@ class CameraManager: NSObject, ObservableObject {
                     // ビデオ出力のorientation を再設定
                     if let connection = self.videoOutput?.connection(with: .video),
                        connection.isVideoOrientationSupported {
-                        connection.videoOrientation = CameraManager.currentCaptureOrientation()
+                        connection.videoOrientation = capturedOrientation
+                    }
+                    // スナップショット出力のorientationも再設定
+                    if let snapConn = self.snapshotOutput?.connection(with: .video),
+                       snapConn.isVideoOrientationSupported {
+                        snapConn.videoOrientation = capturedOrientation
                     }
                     
                     // プレビューレイヤーのorientationも再設定
@@ -374,15 +481,19 @@ class CameraManager: NSObject, ObservableObject {
                         self.zoomFactor = 1.0
                         if let previewConnection = self.previewLayer?.connection,
                            previewConnection.isVideoOrientationSupported {
-                            previewConnection.videoOrientation = CameraManager.currentCaptureOrientation()
+                            previewConnection.videoOrientation = capturedOrientation
                         }
                     }
                     
                     self.configureDevice(camera)
+                    #if DEBUG
                     print("✅ カメラ切り替え: \(camera.localizedName)")
+                    #endif
                 } else {
                     // canAddInput失敗 → 元のカメラ入力を復元
+                    #if DEBUG
                     print("⚠️ [CameraManager] canAddInput failed – restoring previous camera")
+                    #endif
                     session.sessionPreset = previousPreset
                     if session.canAddInput(currentInput) {
                         session.addInput(currentInput)
@@ -390,7 +501,9 @@ class CameraManager: NSObject, ObservableObject {
                 }
             } catch {
                 // 例外発生 → 元のカメラ入力を復元
+                #if DEBUG
                 print("❌ [CameraManager] switchCamera error: \(error.localizedDescription) – restoring previous camera")
+                #endif
                 session.sessionPreset = previousPreset
                 if session.canAddInput(currentInput) {
                     session.addInput(currentInput)
@@ -435,7 +548,9 @@ class CameraManager: NSObject, ObservableObject {
             
             device.unlockForConfiguration()
         } catch {
+            #if DEBUG
             print("⚠️ デバイス設定エラー: \(error.localizedDescription)")
+            #endif
         }
     }
     
@@ -446,7 +561,9 @@ class CameraManager: NSObject, ObservableObject {
             session.beginConfiguration()
             if session.canSetSessionPreset(self.videoResolution) {
                 session.sessionPreset = self.videoResolution
+                #if DEBUG
                 print("✅ 解像度変更: \(self.videoResolution.rawValue)")
+                #endif
             }
             session.commitConfiguration()
         }
@@ -469,7 +586,9 @@ class CameraManager: NSObject, ObservableObject {
             
             if connection.isVideoStabilizationSupported {
                 connection.preferredVideoStabilizationMode = self.videoStabilization ? .auto : .off
+                #if DEBUG
                 print("✅ ビデオ安定化: \(self.videoStabilization ? "ON" : "OFF")")
+                #endif
             }
         }
     }
@@ -482,11 +601,15 @@ class CameraManager: NSObject, ObservableObject {
                 try device.lockForConfiguration()
                 if device.isFocusModeSupported(self.focusMode) {
                     device.focusMode = self.focusMode
+                    #if DEBUG
                     print("✅ フォーカスモード: \(self.focusMode.rawValue)")
+                    #endif
                 }
                 device.unlockForConfiguration()
             } catch {
+                #if DEBUG
                 print("⚠️ フォーカスモード設定エラー: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -499,11 +622,15 @@ class CameraManager: NSObject, ObservableObject {
                 try device.lockForConfiguration()
                 if device.isExposureModeSupported(self.exposureMode) {
                     device.exposureMode = self.exposureMode
+                    #if DEBUG
                     print("✅ 露出モード: \(self.exposureMode.rawValue)")
+                    #endif
                 }
                 device.unlockForConfiguration()
             } catch {
+                #if DEBUG
                 print("⚠️ 露出モード設定エラー: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -516,11 +643,15 @@ class CameraManager: NSObject, ObservableObject {
                 try device.lockForConfiguration()
                 if device.isWhiteBalanceModeSupported(self.whiteBalanceMode) {
                     device.whiteBalanceMode = self.whiteBalanceMode
+                    #if DEBUG
                     print("✅ ホワイトバランス: \(self.whiteBalanceMode.rawValue)")
+                    #endif
                 }
                 device.unlockForConfiguration()
             } catch {
+                #if DEBUG
                 print("⚠️ ホワイトバランス設定エラー: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -535,7 +666,9 @@ class CameraManager: NSObject, ObservableObject {
                 device.videoZoomFactor = max(1.0, min(self.zoomFactor, maxZoom))
                 device.unlockForConfiguration()
             } catch {
+                #if DEBUG
                 print("⚠️ ズーム設定エラー: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -548,7 +681,9 @@ class CameraManager: NSObject, ObservableObject {
             guard let self, let device = self.currentCamera else { return }
             
             guard device.hasTorch else {
+                #if DEBUG
                 print("⚠️ トーチが利用できません")
+                #endif
                 return
             }
             
@@ -571,7 +706,9 @@ class CameraManager: NSObject, ObservableObject {
                 
                 device.unlockForConfiguration()
             } catch {
+                #if DEBUG
                 print("⚠️ トーチ設定エラー: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -580,18 +717,24 @@ class CameraManager: NSObject, ObservableObject {
     func startRecording(timestamp: TimeInterval, sessionID: String) {
         // Preview 環境では録画を行わない
         if PreviewDetection.isRunningForPreviews {
+            #if DEBUG
             print("🧪 [CameraManager] Running in Preview – skipping startRecording")
+            #endif
             return
         }
+        #if DEBUG
         print("📹 [CameraManager] ========== START RECORDING ==========")
         print("📹 [CameraManager] SessionID: \(sessionID)")
+        #endif
 
         self.syncTimestamp = timestamp
         self.sessionID = sessionID
 
         // セッションが動いていない場合のみ起動してから録画（フォールバック）
         guard let session = captureSession, session.isRunning else {
+            #if DEBUG
             print("⚠️ [CameraManager] Session not running – starting session first")
+            #endif
             startSession { [weak self] in
                 self?.beginRecording(timestamp: timestamp, sessionID: sessionID)
             }
@@ -605,11 +748,15 @@ class CameraManager: NSObject, ObservableObject {
     private func beginRecording(timestamp: TimeInterval, sessionID: String) {
         guard let output = videoOutput else {
             error = "ビデオ出力が設定されていません"
+            #if DEBUG
             print("❌ [CameraManager] videoOutput が nil")
+            #endif
             return
         }
         guard !output.isRecording else {
+            #if DEBUG
             print("⚠️ [CameraManager] 既に録画中です")
+            #endif
             return
         }
 
@@ -618,7 +765,9 @@ class CameraManager: NSObject, ObservableObject {
         try? FileManager.default.removeItem(at: fileURL)
         currentVideoURL = fileURL
 
+        #if DEBUG
         print("📁 [CameraManager] 保存先: \(fileURL.path)")
+        #endif
         output.startRecording(to: fileURL, recordingDelegate: self)
 
         DispatchQueue.main.async {
@@ -627,20 +776,28 @@ class CameraManager: NSObject, ObservableObject {
             // recordingStartTime は didStartRecordingTo デリゲートで設定する
             // （実際にカメラが録画を開始した瞬間に合わせるため）
         }
+        #if DEBUG
         print("🎥 [CameraManager] 録画開始: \(fileName)")
         print("📹 [CameraManager] ==========================================")
+        #endif
     }
     /// 録画停止（停止後はカメラセッションも完全に止める）
     func stopRecording() {
+        #if DEBUG
         print("📹 [CameraManager] ========== STOP RECORDING ==========")
         print("📹 [CameraManager] Current SessionID: '\(self.sessionID)'")
+        #endif
         
         guard let output = videoOutput, output.isRecording else {
+            #if DEBUG
             print("⚠️ [CameraManager] 録画していません")
+            #endif
             return
         }
         
+        #if DEBUG
         print("📹 [CameraManager] Stopping recording...")
+        #endif
         output.stopRecording()
         // ※ セッション停止は fileOutput(_:didFinishRecordingTo:) の完了後に行う
         // （先に止めると録画ファイルが壊れる可能性があるため）
@@ -652,8 +809,10 @@ class CameraManager: NSObject, ObservableObject {
             self.recordingDuration = 0
         }
         
+        #if DEBUG
         print("⏹️ [CameraManager] 録画停止リクエスト送信")
         print("📹 [CameraManager] ==========================================")
+        #endif
     }
     
     /// タイマー開始
@@ -675,12 +834,16 @@ class CameraManager: NSObject, ObservableObject {
         // Preview 環境では何もしない（UIのクリーンアップのみ）
         if PreviewDetection.isRunningForPreviews {
             DispatchQueue.main.async { self.previewLayer = nil }
+            #if DEBUG
             print("🧪 [CameraManager] Running in Preview – skipping stopSession")
+            #endif
             return
         }
         sessionQueue.async { [weak self] in
             self?.captureSession?.stopRunning()
+            #if DEBUG
             print("🛑 カメラセッション停止")
+            #endif
         }
         stopTimer()
         DispatchQueue.main.async {
@@ -695,7 +858,9 @@ class CameraManager: NSObject, ObservableObject {
 
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
+        #if DEBUG
         print("📹 録画開始: \(fileURL.lastPathComponent)")
+        #endif
         // カメラが実際に録画を開始した瞬間にタイマーをスタート
         // （beginRecording() 呼び出しタイミングではなくここで設定することで
         //   マスター・スレーブ間の非同期起動ズレをタイマーに反映させない）
@@ -707,24 +872,32 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     }
     
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+        #if DEBUG
         print("📹 [CameraManager] ========== DID FINISH RECORDING ==========")
         print("📹 [CameraManager] URL: \(outputFileURL.path)")
         print("📹 [CameraManager] File exists: \(FileManager.default.fileExists(atPath: outputFileURL.path))")
         print("📹 [CameraManager] SessionID: '\(self.sessionID)'")
         print("📹 [CameraManager] SessionID isEmpty: \(self.sessionID.isEmpty)")
         print("📹 [CameraManager] Callback exists: \(onRecordingCompleted != nil)")
+        #endif
         
         if let error = error {
+            #if DEBUG
             print("❌ [CameraManager] 録画エラー: \(error.localizedDescription)")
+            #endif
             self.error = "録画エラー: \(error.localizedDescription)"
             return
         }
         
+        #if DEBUG
         print("✅ [CameraManager] 録画完了: \(outputFileURL.lastPathComponent)")
+        #endif
         
         // ファイルサイズ確認
         if let fileSize = try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[.size] as? UInt64 {
+            #if DEBUG
             print("📹 [CameraManager] File size: \(fileSize) bytes")
+            #endif
         }
         
         // ファイルパスを保存
@@ -741,19 +914,76 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
         
         // 録画完了コールバック（SessionIDと共に通知）
         if !currentSessionID.isEmpty {
+            #if DEBUG
             print("📹 [CameraManager] ✅ Calling completion callback with SessionID: \(currentSessionID)")
+            #endif
             onRecordingCompleted?(outputFileURL, currentSessionID)
+            #if DEBUG
             print("📹 [CameraManager] ✅ Callback invoked")
+            #endif
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                #if DEBUG
                 print("📹 [CameraManager] Clearing SessionID")
+                #endif
                 self.sessionID = ""
             }
         } else {
+            #if DEBUG
             print("⚠️ [CameraManager] ❌ SessionID is empty, NOT calling callback")
+            #endif
         }
         
+        #if DEBUG
         print("📹 [CameraManager] ================================================")
+        #endif
+    }
+}
+
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate (Snapshot)
+
+extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard isSnapshotEnabled else { return }
+        
+        // フレーム間引き：snapshotInterval 未満のフレームはスキップ
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastSnapshotTime >= snapshotInterval else { return }
+        lastSnapshotTime = now
+        
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        
+        // desiredOrientation に合わせてクロップ
+        let fullW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let fullH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        let targetRatio = desiredOrientation.aspectRatio
+        let currentRatio = fullW / fullH
+        
+        let cropRect: CGRect
+        if abs(currentRatio - targetRatio) < 0.05 {
+            cropRect = CGRect(x: 0, y: 0, width: fullW, height: fullH)
+        } else if targetRatio > currentRatio {
+            let newH = fullW / targetRatio
+            cropRect = CGRect(x: 0, y: (fullH - newH) / 2, width: fullW, height: newH)
+        } else {
+            let newW = fullH * targetRatio
+            cropRect = CGRect(x: (fullW - newW) / 2, y: 0, width: newW, height: fullH)
+        }
+        
+        let cropped = ciImage.cropped(to: cropRect)
+        
+        // 帯域節約のため小さいサイズにリサイズ（幅320px程度）
+        let scale = 320.0 / cropRect.width
+        let resized = cropped.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        
+        guard let cgImage = snapshotCIContext.createCGImage(resized, from: resized.extent) else { return }
+        let uiImage = UIImage(cgImage: cgImage)
+        guard let jpegData = uiImage.jpegData(compressionQuality: 0.4) else { return }
+        
+        DispatchQueue.main.async {
+            self.latestSnapshot = jpegData
+        }
     }
 }
 

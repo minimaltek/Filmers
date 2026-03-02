@@ -22,7 +22,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> UIInterfaceOrientationMask {
         // 録画中は現在の向きに固定（回転を禁止）
         if OrientationLock.isRecording {
-            // 現在の画面向きを取得して、その向きだけを許可する
             let current = window?.windowScene?.interfaceOrientation ?? .portrait
             switch current {
             case .landscapeLeft:           return .landscapeLeft
@@ -31,9 +30,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             default:                       return .portrait
             }
         }
-        // カメラ起動中も回転を許可（プレビューが端末の向きに追従する）
-        // 通常時・カメラ起動中ともに全向きを許可
-        return .allButUpsideDown
+        // iPad は常に全向きを許可
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            return .allButUpsideDown
+        }
+        // iPhone: カメラ起動中のみ回転を許可、それ以外は縦固定
+        if OrientationLock.isCameraActive {
+            return .allButUpsideDown
+        }
+        return .portrait
     }
 }
 

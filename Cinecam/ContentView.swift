@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Combine
+import MultipeerConnectivity
 
 struct ContentView: View {
     @StateObject private var sessionManager = CameraSessionManager()
@@ -17,8 +18,12 @@ struct ContentView: View {
     
     // 役割選択状態（nilなら未選択）
     @State private var selectedRole: DeviceRole? = nil
-    // SEARCHING ドットアニメーション（0→1→2→3→0...）
-    @State private var dotCount: Int = 0
+    // SEARCHING ビートアニメーション（1個ずつ出て8個でスペース、を繰り返す）
+    // Timer ではなく TimelineView + Date で駆動するため、メインスレッドのハングに影響されない
+    /// 画面に収まる総ドット数（GeometryReaderで算出、8の倍数）
+    @State private var beatGroupCount: Int = 16
+    /// ビートの間隔（秒）
+    private let beatInterval: Double = 0.5
     
     enum DeviceRole {
         case master
@@ -42,9 +47,7 @@ struct ContentView: View {
         .onDisappear {
             cameraManager.stopSession()
         }
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            dotCount = (dotCount + 1) % 9
-        }
+        // beatPhase は TimelineView から算出するため Timer 不要
         .onChange(of: sessionManager.masterPeerID) { newMasterPeerID in
             if newMasterPeerID != nil,
                !sessionManager.isMaster,
@@ -54,10 +57,20 @@ struct ContentView: View {
                     selectedRole = .slave
                 }
             } else if newMasterPeerID == nil,
-                      selectedRole == .slave {
-                // マスターが切断された → 役割選択画面（SEARCHING状態）に戻る
+                      selectedRole == .slave,
+                      !sessionManager.persistentRole {
+                // マスターが切断された → 役割選択画面（SEARCHING状態）に戻る（永続モードでは戻さない）
                 withAnimation {
                     selectedRole = nil
+                }
+            }
+        }
+        .onChange(of: sessionManager.isMaster) { nowMaster in
+            // ★ マスター衝突解決でスレーブに降格された場合
+            if !nowMaster && selectedRole == .master && sessionManager.masterPeerID != nil {
+                // 接続確立まではmainScreen（slaveWaitingView）で待機
+                withAnimation {
+                    selectedRole = .slave
                 }
             }
         }
@@ -66,27 +79,49 @@ struct ContentView: View {
             if sessionManager.masterPeerID != nil,
                !sessionManager.isMaster,
                !sessionManager.connectedPeers.isEmpty,
-               selectedRole == nil {
+               selectedRole == nil || selectedRole == .master {
+                // selectedRole == .master: マスター衝突解決でスレーブに降格された場合
                 withAnimation {
                     selectedRole = .slave
                 }
             }
         }
-        .sheet(isPresented: $showSettings) {
+        .sheet(isPresented: $showSettings, onDismiss: {
+            sessionManager.resumeDiscovery()
+        }) {
             SettingsView(cameraManager: cameraManager)
+                .onAppear { sessionManager.pauseDiscovery() }
         }
-        .sheet(isPresented: $showLibrary) {
+        .sheet(isPresented: $showLibrary, onDismiss: {
+            sessionManager.resumeDiscovery()
+        }) {
             LibraryView(library: library)
+                .onAppear { sessionManager.pauseDiscovery() }
         }
         .fullScreenCover(isPresented: $sessionManager.showPreview, onDismiss: {
             let wasMaster = sessionManager.cleanupSessionAfterPreview()
-            if wasMaster {
-                // マスター → roleSelectionScreenに戻る（MASTERボタンを再度押す）
+            if sessionManager.persistentRole {
+                // ★ 永続モード: マスターもスレーブも現在の役割画面にとどまる
+                if wasMaster {
+                    withAnimation {
+                        selectedRole = .master
+                    }
+                    // マスターはカメラを自動起動する
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        sessionManager.startCameraForAll()
+                    }
+                } else {
+                    withAnimation {
+                        selectedRole = .slave
+                    }
+                }
+            } else if wasMaster {
+                // 非永続: マスター → roleSelectionScreenに戻る
                 withAnimation {
                     selectedRole = nil
                 }
             } else {
-                // スレーブ → slaveWaitingView（AWAIT画面）に留まる
+                // 非永続: スレーブ → slaveWaitingView（AWAIT画面）に留まる
                 withAnimation {
                     selectedRole = .slave
                 }
@@ -99,10 +134,11 @@ struct ContentView: View {
                 onRename: { newTitle in
                     library.rename(id: sessionManager.previewSessionID, title: newTitle)
                 },
-                onSaveEditState: { segmentsByDevice in
-                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice)
+                onSaveEditState: { segmentsByDevice, lockedDevices in
+                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices)
                 },
                 savedEditState: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.editState ?? [:],
+                savedLockedDevices: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.lockedDevices ?? [],
                 desiredOrientation: cameraManager.desiredOrientation
             )
         }
@@ -129,15 +165,21 @@ struct ContentView: View {
     // MARK: - Setup
     
     private func setupCallbacks() {
+        #if DEBUG
         print("📹 [ContentView] Setting up callbacks")
+        #endif
         
         cameraManager.onRecordingCompleted = { [weak sessionManager] videoURL, sessionID in
+            #if DEBUG
             print("📹 [ContentView] Recording completed callback")
+            #endif
             sessionManager?.handleRecordingCompleted(videoURL: videoURL, sessionID: sessionID)
         }
         
         sessionManager.cameraManager = cameraManager
+        #if DEBUG
         print("📹 [ContentView] CameraManager linked to SessionManager")
+        #endif
     }
     
     // MARK: - Role Selection Actions
@@ -153,12 +195,30 @@ struct ContentView: View {
     
     private let accentGreen = Color(red: 0.0, green: 0.8, blue: 0.4)
     private let cyanTint = Color(red: 0.0, green: 0.7, blue: 0.65)
-    private let statusBlue = Color(red: 0.3, green: 0.55, blue: 1.0)
+    private let matrixGreen = Color(red: 0.0, green: 1.0, blue: 0.25)
     private let logoDotWhite = Color.white
     
-    /// アニメーションドット文字列（""→"."→".."→"..."）
-    private var animatedDots: String {
-        String(repeating: ".", count: dotCount)
+    /// 現在時刻からビートフェーズを算出（Timer 不要。TimelineView の date から呼ぶ）
+    private func beatPhase(at date: Date) -> Int {
+        let elapsed = date.timeIntervalSinceReferenceDate
+        let totalPhases = beatGroupCount + 1  // 0=空 ～ N=全点灯 → 0にリセット
+        guard totalPhases > 0 else { return 0 }
+        let phase = Int(elapsed / beatInterval) % totalPhases
+        return phase
+    }
+
+    /// ビートドット文字列（1個ずつ増え、8個ごとにスペースが入る）
+    private func animatedDots(at date: Date) -> String {
+        let phase = beatPhase(at: date)
+        guard phase > 0 else { return "" }
+        var result = ""
+        for i in 1...phase {
+            result += "."
+            if i % 8 == 0 && i < phase {
+                result += " "
+            }
+        }
+        return result
     }
     
     /// iPad対応: コンテンツの最大幅（iPhone風のコンパクトなレイアウト）
@@ -169,60 +229,94 @@ struct ContentView: View {
             // ── ヘッダー ──
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
-                        .font(.system(size: 32, weight: .black, design: .default))
-                        .fontWidth(.compressed)
-                        .tracking(-0.5)
+                    HStack(alignment: .lastTextBaseline, spacing: 4) {
+                        (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
+                            .font(.system(size: 32, weight: .black, design: .default))
+                            .fontWidth(.compressed)
+                            .tracking(-0.5)
+                        Text("v029")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.5))
+                    }
                     
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(sessionManager.connectionState == .connected ? accentGreen : statusBlue)
-                            .frame(width: 8, height: 8)
-                        if sessionManager.connectionState == .connected {
+                    if sessionManager.connectionState == .connected {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(accentGreen)
+                                .frame(width: 8, height: 8)
                             Text("SYSTEM READY")
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                                 .tracking(2)
                                 .foregroundColor(accentGreen)
-                        } else {
-                            Text("SEARCHING\(animatedDots)")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .tracking(2)
-                                .foregroundColor(statusBlue)
-                                .animation(.none, value: dotCount)
                         }
                     }
                 }
                 
                 Spacer()
                 
-                // ライブラリボタン
-                Button(action: { showLibrary = true }) {
-                    ZStack {
-                        Image(systemName: "square.grid.2x2")
-                            .font(.system(size: 18))
-                            .foregroundColor(.white.opacity(0.6))
-                        if !library.records.isEmpty {
-                            Text("\(library.records.count)")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundColor(.black)
-                                .frame(width: 14, height: 14)
-                                .background(Color.orange)
-                                .clipShape(Circle())
-                                .offset(x: 10, y: -8)
+                HStack(spacing: 12) {
+                    // ライブラリボタン
+                    Button(action: { showLibrary = true }) {
+                        ZStack {
+                            Image(systemName: "square.grid.2x2")
+                                .font(.system(size: 18))
+                                .foregroundColor(.white.opacity(0.6))
+                            if !library.records.isEmpty {
+                                Text("\(library.records.count)")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(.black)
+                                    .frame(width: 14, height: 14)
+                                    .background(Color.orange)
+                                    .clipShape(Circle())
+                                    .offset(x: 10, y: -8)
+                            }
                         }
                     }
+                    
+                    // 設定ボタン
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 18))
+                            .foregroundColor(.white.opacity(0.6))
+                    }
                 }
-                .padding(.trailing, 12)
-                
-                // 設定ボタン
-                Button(action: { showSettings = true }) {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 18))
-                        .foregroundColor(.white.opacity(0.6))
-                }
+                .padding(.top, 8)
             }
             .padding(.horizontal, 24)
             .padding(.top, 16)
+            
+            // ── SEARCHING ドットアニメーション（TimelineView で駆動、メインスレッドハングに強い） ──
+            if sessionManager.connectionState != .connected {
+                TimelineView(.periodic(from: .now, by: beatInterval)) { context in
+                    GeometryReader { geo in
+                        let availableWidth = geo.size.width - 48
+                        let charWidth: CGFloat = 8.0
+                        let searchingWidth = charWidth * 9
+                        let dotAreaWidth = availableWidth - searchingWidth - 14
+                        let groupWidth = charWidth * 9
+                        let groups = max(1, Int((dotAreaWidth + charWidth) / groupWidth))
+                        let totalDots = groups * 8
+                        let _ = DispatchQueue.main.async {
+                            if beatGroupCount != totalDots {
+                                beatGroupCount = totalDots
+                            }
+                        }
+
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(matrixGreen)
+                                .frame(width: 8, height: 8)
+                            Text("SEARCHING\(animatedDots(at: context.date))")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(2)
+                                .foregroundColor(matrixGreen)
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 24)
+                    }
+                }
+                .frame(height: 16)
+            }
             
             Spacer().frame(height: 20)
             
@@ -248,11 +342,17 @@ struct ContentView: View {
                     let myName = UserDefaults.standard.string(forKey: "cinecam.userName")
                         .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                         ?? UIDevice.current.name
-                    nodeRow(name: myName.uppercased(), isSelf: true)
+                    let selfIsMaster = sessionManager.isMaster
+                    nodeRow(name: myName.uppercased(), isSelf: true,
+                            score: sessionManager.deviceScore,
+                            isMasterNode: selfIsMaster)
                     
                     // 接続端末
                     ForEach(sessionManager.connectedPeerNames, id: \.self) { peerName in
-                        nodeRow(name: peerName.uppercased(), isSelf: false)
+                        let peerIsMaster = sessionManager.masterPeerID?.displayName == peerName
+                        nodeRow(name: peerName.uppercased(), isSelf: false,
+                                score: sessionManager.peerScores[peerName] ?? 0,
+                                isMasterNode: peerIsMaster)
                     }
                 }
                 .background(Color.white.opacity(0.03))
@@ -272,124 +372,136 @@ struct ContentView: View {
             
             Spacer()
             
-            if sessionManager.connectedPeers.isEmpty {
-                // ── 接続ピアなし: AWAITING表示 ──
+            // ── MASTERボタン（接続済みピアがある時に表示） ──
+            if !sessionManager.connectedPeers.isEmpty {
+            Text("SELECT OPERATIONAL ROLE")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .tracking(3)
+                .foregroundColor(.white.opacity(0.3))
+                .padding(.bottom, 16)
+            
+            Button(action: {
+                selectMasterRole()
+            }) {
                 VStack(spacing: 10) {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
+                    Image(systemName: "scope")
                         .font(.system(size: 30, weight: .light))
-                        .foregroundColor(.white.opacity(0.2))
+                        .foregroundColor(.orange)
                     
-                    Text("AWAITING")
+                    Text("MASTER")
                         .font(.system(size: 18, weight: .bold, design: .monospaced))
                         .tracking(3)
-                        .foregroundColor(.white.opacity(0.2))
+                        .foregroundColor(.orange)
                     
-                    Text("SEARCHING FOR\nNODES...")
+                    Text("GLOBAL CONTROL\n& SEQUENCING")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .tracking(1)
                         .multilineTextAlignment(.center)
-                        .foregroundColor(.white.opacity(0.15))
+                        .foregroundColor(.white.opacity(0.4))
                 }
                 .frame(width: 150, height: 150)
                 .background(
                     RoundedRectangle(cornerRadius: 18)
-                        .fill(Color.white.opacity(0.02))
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.orange.opacity(0.15), Color.orange.opacity(0.05)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
                         .overlay(
                             RoundedRectangle(cornerRadius: 18)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                .stroke(Color.orange.opacity(0.4), lineWidth: 1)
                         )
                 )
-            } else {
-                // ── 接続ピアあり: MASTERボタン ──
-                Text("SELECT OPERATIONAL ROLE")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .tracking(3)
-                    .foregroundColor(.white.opacity(0.3))
-                    .padding(.bottom, 16)
-                
-                Button(action: {
-                    selectMasterRole()
-                }) {
-                    VStack(spacing: 10) {
-                        Image(systemName: "scope")
-                            .font(.system(size: 30, weight: .light))
-                            .foregroundColor(.orange)
-                        
-                        Text("MASTER")
-                            .font(.system(size: 18, weight: .bold, design: .monospaced))
-                            .tracking(3)
-                            .foregroundColor(.orange)
-                        
-                        Text("GLOBAL CONTROL\n& SEQUENCING")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .tracking(1)
-                            .multilineTextAlignment(.center)
-                            .foregroundColor(.white.opacity(0.4))
-                    }
-                    .frame(width: 150, height: 150)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.orange.opacity(0.15), Color.orange.opacity(0.05)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 18)
-                                    .stroke(Color.orange.opacity(0.4), lineWidth: 1)
-                            )
-                    )
-                }
             }
+            } // if connectedPeers
             
             Spacer()
             
-            // ── DISCONNECT SESSION ──
-            Button(action: {
-                sessionManager.restartDiscovery()
-            }) {
-                Text("DISCONNECT SESSION")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .tracking(2)
-                    .foregroundColor(.red.opacity(0.7))
+            // ── REBUILD SESSION（接続がない時に表示、アプリ再起動と同等の再構築） ──
+            if sessionManager.connectedPeers.isEmpty {
+                Button(action: {
+                    sessionManager.rebuildSession()
+                }) {
+                    HStack(spacing: 8) {
+                        if sessionManager.isRebuilding {
+                            ProgressView()
+                                .tint(.cyan.opacity(0.5))
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        Text(sessionManager.isRebuilding ? "REBUILDING..." : "REBUILD SESSION")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .tracking(2)
+                    }
+                    .foregroundColor(sessionManager.isRebuilding ? .cyan.opacity(0.3) : .cyan.opacity(0.7))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
                     .background(
                         RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.red.opacity(0.2), lineWidth: 1)
+                            .stroke(sessionManager.isRebuilding ? Color.cyan.opacity(0.1) : Color.cyan.opacity(0.2), lineWidth: 1)
                     )
+                }
+                .disabled(sessionManager.isRebuilding)
+                .padding(.horizontal, 40)
+                .padding(.bottom, 30)
             }
-            .padding(.horizontal, 40)
-            .padding(.bottom, 30)
+            
+            // ── DISCONNECT SESSION（他ノードに接続中のみ表示） ──
+            if !sessionManager.connectedPeers.isEmpty {
+                Button(action: {
+                    sessionManager.restartDiscovery()
+                }) {
+                    Text("DISCONNECT SESSION")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .tracking(2)
+                        .foregroundColor(.red.opacity(0.7))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.red.opacity(0.2), lineWidth: 1)
+                        )
+                }
+                .padding(.horizontal, 40)
+                .padding(.bottom, 30)
+            }
         }
         .frame(maxWidth: maxContentWidth)
     }
     
     // ノード行（CONNECTED NODES用）
-    private func nodeRow(name: String, isSelf: Bool) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "display")
+    private func nodeRow(name: String, isSelf: Bool, score: Int, isMasterNode: Bool) -> some View {
+        HStack(spacing: 8) {
+            // アイコン: 自端末=人、他端末=スマホ
+            Image(systemName: isSelf ? "person.fill" : "iphone")
                 .font(.system(size: 12))
-                .foregroundColor(.white.opacity(0.3))
+                .foregroundColor(.white.opacity(0.4))
+                .frame(width: 16)
             
+            // 名前（長い場合は truncate）
             Text(name)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
                 .foregroundColor(.white.opacity(0.8))
+                .lineLimit(1)
+                .truncationMode(.tail)
             
-            if isSelf {
-                Text("(YOU)")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.3))
-            }
+            // スコア表示
+            Text("(\(score))")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundColor(.white.opacity(0.25))
+                .layoutPriority(1)
             
             Spacer()
             
-            // Signal indicator
+            // Signal indicator: MASTER確定時は緑、それ以外はオレンジ
             Image(systemName: "chart.bar.fill")
                 .font(.system(size: 14))
-                .foregroundColor(.orange.opacity(0.7))
+                .foregroundColor(isMasterNode ? accentGreen : .orange.opacity(0.7))
+                .layoutPriority(1)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -420,14 +532,19 @@ struct ContentView: View {
                     // ── ヘッダー（roleSelectionScreenと統一） ──
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
-                            (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
-                                .font(.system(size: 32, weight: .black, design: .default))
-                                .fontWidth(.compressed)
-                                .tracking(-0.5)
+                            HStack(alignment: .lastTextBaseline, spacing: 4) {
+                                (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
+                                    .font(.system(size: 32, weight: .black, design: .default))
+                                    .fontWidth(.compressed)
+                                    .tracking(-0.5)
+                                Text("v029")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.5))
+                            }
                             
                             HStack(spacing: 6) {
                                 Circle()
-                                    .fill(sessionManager.connectionState == .connected ? accentGreen : statusBlue)
+                                    .fill(sessionManager.connectionState == .connected ? accentGreen : matrixGreen)
                                     .frame(width: 8, height: 8)
                                 Text(sessionManager.isMaster ? "MASTER MODE" : "SLAVE MODE")
                                     .font(.system(size: 10, weight: .bold, design: .monospaced))
@@ -438,29 +555,31 @@ struct ContentView: View {
                         
                         Spacer()
                         
-                        Button(action: { showLibrary = true }) {
-                            ZStack {
-                                Image(systemName: "square.grid.2x2")
-                                    .font(.system(size: 18))
-                                    .foregroundColor(.white.opacity(0.6))
-                                if !library.records.isEmpty {
-                                    Text("\(library.records.count)")
-                                        .font(.system(size: 8, weight: .bold))
-                                        .foregroundColor(.black)
-                                        .frame(width: 14, height: 14)
-                                        .background(Color.orange)
-                                        .clipShape(Circle())
-                                        .offset(x: 10, y: -8)
+                        HStack(spacing: 12) {
+                            Button(action: { showLibrary = true }) {
+                                ZStack {
+                                    Image(systemName: "square.grid.2x2")
+                                        .font(.system(size: 18))
+                                        .foregroundColor(.white.opacity(0.6))
+                                    if !library.records.isEmpty {
+                                        Text("\(library.records.count)")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundColor(.black)
+                                            .frame(width: 14, height: 14)
+                                            .background(Color.orange)
+                                            .clipShape(Circle())
+                                            .offset(x: 10, y: -8)
+                                    }
                                 }
                             }
+                            
+                            Button(action: { showSettings = true }) {
+                                Image(systemName: "gearshape")
+                                    .font(.system(size: 18))
+                                    .foregroundColor(.white.opacity(0.6))
+                            }
                         }
-                        .padding(.trailing, 12)
-                        
-                        Button(action: { showSettings = true }) {
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 18))
-                                .foregroundColor(.white.opacity(0.6))
-                        }
+                        .padding(.top, 8)
                     }
                     .padding(.horizontal, 24)
                     .padding(.top, 16)
@@ -486,10 +605,16 @@ struct ContentView: View {
                             let myName = UserDefaults.standard.string(forKey: "cinecam.userName")
                                 .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                                 ?? UIDevice.current.name
-                            nodeRow(name: myName.uppercased(), isSelf: true)
+                            let selfIsMaster = sessionManager.isMaster
+                            nodeRow(name: myName.uppercased(), isSelf: true,
+                                    score: sessionManager.deviceScore,
+                                    isMasterNode: selfIsMaster)
                             
                             ForEach(sessionManager.connectedPeerNames, id: \.self) { peerName in
-                                nodeRow(name: peerName.uppercased(), isSelf: false)
+                                let peerIsMaster = sessionManager.masterPeerID?.displayName == peerName
+                                nodeRow(name: peerName.uppercased(), isSelf: false,
+                                        score: sessionManager.peerScores[peerName] ?? 0,
+                                        isMasterNode: peerIsMaster)
                             }
                         }
                         .background(Color.white.opacity(0.03))
@@ -594,12 +719,15 @@ struct ContentView: View {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(sessionManager.logs.enumerated()), id: \.offset) { index, log in
-                        HStack(spacing: 6) {
-                            Image(systemName: getLogIcon(log))
+                        let parts = parseLog(log)
+                        HStack(spacing: 4) {
+                            Text(parts.time)
+                                .font(.system(size: 8, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.35))
+                            Image(systemName: getLogIcon(parts.message))
                                 .font(.system(size: 8))
                                 .foregroundColor(.white.opacity(0.35))
-                            
-                            Text(log)
+                            Text(parts.message)
                                 .font(.system(size: 8, design: .monospaced))
                                 .foregroundColor(.white.opacity(0.5))
                                 .lineLimit(1)
@@ -637,6 +765,17 @@ struct ContentView: View {
         return "circle"
     }
     
+    /// ログ文字列を "[HH:mm:ss] メッセージ" → (time, message) に分解
+    private func parseLog(_ log: String) -> (time: String, message: String) {
+        // "[HH:mm:ss] メッセージ" 形式を分割
+        if log.hasPrefix("["), let closeBracket = log.firstIndex(of: "]") {
+            let time = String(log[log.startIndex...closeBracket])
+            let msg = String(log[log.index(after: closeBracket)...]).trimmingCharacters(in: .whitespaces)
+            return (time, msg)
+        }
+        return ("", log)
+    }
+    
     // MARK: - Master Control Screen
     
     private var masterControlView: some View {
@@ -646,51 +785,100 @@ struct ContentView: View {
                 let hasPeers = !sessionManager.connectedPeers.isEmpty
                 let isWaiting = sessionManager.isWaitingForCameraReady
                 
-                Button(action: {
-                    sessionManager.startCameraForAll()
-                }) {
+                if isWaiting {
+                    // WAITING状態（グレー、ボタンではなく表示のみ）
                     VStack(spacing: 10) {
-                        if isWaiting {
-                            ProgressView()
-                                .tint(.orange)
-                                .scaleEffect(1.2)
-                                .frame(height: 30)
-                        } else {
-                            Image(systemName: "camera")
-                                .font(.system(size: 30, weight: .light))
-                                .foregroundColor(hasPeers ? .orange : .orange.opacity(0.4))
-                        }
+                        ProgressView()
+                            .tint(.gray)
+                            .scaleEffect(1.2)
+                            .frame(height: 30)
                         
-                        Text(isWaiting ? "WAITING" : "START CAMERA")
+                        Text("WAITING")
                             .font(.system(size: 14, weight: .bold, design: .monospaced))
                             .tracking(2)
-                            .foregroundColor(hasPeers || isWaiting ? .orange : .orange.opacity(0.4))
+                            .foregroundColor(.gray)
                         
-                        Text(isWaiting ? "SYNCING ALL NODES" :
-                             hasPeers ? "ACTIVATE ALL NODES" : "NO NODES CONNECTED")
+                        Text("SYNCING ALL NODES")
                             .font(.system(size: 9, weight: .medium, design: .monospaced))
                             .tracking(1)
-                            .foregroundColor(isWaiting ? .orange.opacity(0.5) :
-                                             hasPeers ? .white.opacity(0.4) : .red.opacity(0.5))
+                            .foregroundColor(.gray.opacity(0.5))
                     }
                     .frame(width: 150, height: 150)
                     .background(
                         RoundedRectangle(cornerRadius: 18)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.orange.opacity(hasPeers ? 0.15 : 0.05),
-                                             Color.orange.opacity(hasPeers ? 0.05 : 0.02)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
+                            .fill(Color.white.opacity(0.03))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 18)
-                                    .stroke(Color.orange.opacity(hasPeers ? 0.4 : 0.15), lineWidth: 1)
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
                             )
                     )
+                } else if !hasPeers && sessionManager.isRetrying {
+                    // RECONNECTING状態（リトライ中でピアなし）
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .tint(.orange)
+                            .scaleEffect(1.2)
+                            .frame(height: 30)
+                        
+                        Text("RECONNECTING")
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .tracking(2)
+                            .foregroundColor(.orange)
+                        
+                        Text("SEARCHING FOR NODES")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .tracking(1)
+                            .foregroundColor(.orange.opacity(0.5))
+                    }
+                    .frame(width: 150, height: 150)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18)
+                            .fill(Color.orange.opacity(0.05))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                            )
+                    )
+                } else {
+                    // START CAMERAボタン（赤）
+                    Button(action: {
+                        sessionManager.startCameraForAll()
+                    }) {
+                        VStack(spacing: 10) {
+                            Image(systemName: "camera")
+                                .font(.system(size: 30, weight: .light))
+                                .foregroundColor(hasPeers ? .red : .red.opacity(0.4))
+                            
+                            Text("START CAMERA")
+                                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                .tracking(2)
+                                .foregroundColor(hasPeers ? .red : .red.opacity(0.4))
+                            
+                            Text(hasPeers ? "ACTIVATE ALL NODES" : "NO NODES CONNECTED")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .tracking(1)
+                                .foregroundColor(hasPeers ? .white.opacity(0.4) : .red.opacity(0.5))
+                        }
+                        .frame(width: 150, height: 150)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color.red.opacity(hasPeers ? 0.15 : 0.05),
+                                                 Color.red.opacity(hasPeers ? 0.05 : 0.02)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 18)
+                                        .stroke(Color.red.opacity(hasPeers ? 0.4 : 0.15), lineWidth: 1)
+                                )
+                        )
+                    }
+                    .disabled(!hasPeers)
+                    .opacity(hasPeers ? 1.0 : 0.35)
                 }
-                .disabled(isWaiting || !hasPeers)
             }
             
             // Session ID
@@ -712,31 +900,31 @@ struct ContentView: View {
                 VStack(spacing: 10) {
                     Image(systemName: "antenna.radiowaves.left.and.right")
                         .font(.system(size: 30, weight: .light))
-                        .foregroundColor(cyanTint)
+                        .foregroundColor(accentGreen)
                     
                     Text("AWAITING")
                         .font(.system(size: 14, weight: .bold, design: .monospaced))
                         .tracking(2)
-                        .foregroundColor(cyanTint)
+                        .foregroundColor(accentGreen)
                     
                     Text("MASTER SIGNAL")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .tracking(1)
-                        .foregroundColor(.white.opacity(0.4))
+                        .foregroundColor(accentGreen.opacity(0.5))
                 }
                 .frame(width: 150, height: 150)
                 .background(
                     RoundedRectangle(cornerRadius: 18)
                         .fill(
                             LinearGradient(
-                                colors: [cyanTint.opacity(0.1), cyanTint.opacity(0.03)],
+                                colors: [accentGreen.opacity(0.1), accentGreen.opacity(0.03)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 18)
-                                .stroke(cyanTint.opacity(0.3), lineWidth: 1)
+                                .stroke(accentGreen.opacity(0.3), lineWidth: 1)
                         )
                 )
             }
