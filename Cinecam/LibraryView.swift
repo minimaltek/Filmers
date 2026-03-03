@@ -70,9 +70,12 @@ struct LibraryView: View {
                         }
                         .foregroundColor(.white)
                     } else {
-                        Button("Select") {
+                        Button {
                             isSelectMode = true
                             selectedIDs.removeAll()
+                        } label: {
+                            Image(systemName: "checkmark.circle")
+                                .font(.system(size: 20))
                         }
                         .foregroundColor(.white)
                     }
@@ -224,6 +227,8 @@ struct LibraryView: View {
                 .font(.subheadline)
                 .foregroundColor(.white.opacity(0.4))
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
     }
 
     // MARK: - Selection

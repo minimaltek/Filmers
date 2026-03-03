@@ -272,7 +272,9 @@ struct CameraOverlayControls: View {
     
     private func lensButton(for camera: AVCaptureDevice) -> some View {
         let isSelected = cameraManager.currentCamera?.uniqueID == camera.uniqueID
+        let isDisabled = cameraManager.isRecording && !isSelected
         return Button(action: {
+            guard !cameraManager.isRecording else { return }
             cameraManager.switchCamera(to: camera)
         }) {
             ZStack {
@@ -288,9 +290,10 @@ struct CameraOverlayControls: View {
                 
                 Text(CameraHelper.zoomLabel(for: camera.deviceType))
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(isSelected ? .yellow : .white)
+                    .foregroundColor(isSelected ? .yellow : (isDisabled ? .white.opacity(0.3) : .white))
             }
         }
+        .disabled(isDisabled)
     }
     
     // MARK: - Center Recording Timer

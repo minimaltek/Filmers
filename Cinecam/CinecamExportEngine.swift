@@ -179,44 +179,46 @@ final class ExportEngine: ObservableObject {
                 // 特定デバイスの音声を使用: clip の trimIn を音声ソースのソース時間に変換
                 let audioSrcTime = clip.trimIn - audioVideoStart
                 let durationSec = CMTimeGetSeconds(duration)
-                #if DEBUG
-                print("🔊 [Export] clip trimIn=\(clip.trimIn), audioSrcTime=\(audioSrcTime), dur=\(durationSec), audioDur=\(audioSourceDuration)")
-                #endif
-                // 音声ソースの範囲内かチェック（負の値や範囲超過はスキップ）
-                var audioInserted = false
-                if audioSrcTime >= -0.01 {
-                    // 音声アセットの実際の長さに収まるようクランプ
-                    let safeStart = max(audioSrcTime, 0)
-                    let clampedEnd = min(safeStart + durationSec, audioSourceDuration)
-                    let clampedDur = max(clampedEnd - safeStart, 0)
-                    if clampedDur > 0.001 {
-                        let clampedDuration = CMTimeMakeWithSeconds(clampedDur, preferredTimescale: 600)
-                        let audioTimeRange = CMTimeRange(
-                            start: CMTimeMakeWithSeconds(safeStart, preferredTimescale: 600),
-                            duration: clampedDuration
-                        )
-                        do {
-                            try audioTrack.insertTimeRange(audioTimeRange, of: srcAudioTrack, at: cursor)
-                            audioInserted = true
-                            // クランプで短くなった分を空区間で埋める
-                            let shortfall = duration - clampedDuration
-                            if CMTimeGetSeconds(shortfall) > 0.001 {
-                                audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor + clampedDuration, duration: shortfall))
-                            }
-                        } catch {
-                            #if DEBUG
-                            print("⚠️ [Export] Audio insert failed at \(safeStart): \(error.localizedDescription)")
-                            #endif
+                // 音声ソースの範囲内かチェック
+                let safeStart = max(audioSrcTime, 0)
+                let clampedEnd = min(safeStart + durationSec, max(audioSourceDuration, 0))
+                let clampedDur = max(clampedEnd - safeStart, 0)
+
+                if clampedDur > 0.01 {
+                    let clampedDuration = CMTimeMakeWithSeconds(clampedDur, preferredTimescale: 600)
+                    let audioTimeRange = CMTimeRange(
+                        start: CMTimeMakeWithSeconds(safeStart, preferredTimescale: 600),
+                        duration: clampedDuration
+                    )
+                    do {
+                        try audioTrack.insertTimeRange(audioTimeRange, of: srcAudioTrack, at: cursor)
+                        // クランプで短くなった分を空の時間範囲で穴埋め
+                        let shortfall = duration - clampedDuration
+                        if CMTimeGetSeconds(shortfall) > 0.01 {
+                            audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor + clampedDuration, duration: shortfall))
                         }
+                    } catch {
+                        // 挿入失敗 → 無音で埋める
+                        audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: duration))
+                        #if DEBUG
+                        print("⚠️ [Export] Audio insert failed at \(safeStart): \(error.localizedDescription)")
+                        #endif
                     }
-                }
-                if !audioInserted {
-                    // 範囲外 or 挿入失敗: 無音の空区間を挿入（ギャップ防止）
+                } else {
+                    // 範囲外: 無音で埋める
                     audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: duration))
                 }
             } else if let srcAudio = try? await asset.loadTracks(withMediaType: .audio).first {
                 // 編集に従う: 各クリップ自身の音声を使用
-                try? audioTrack.insertTimeRange(timeRange, of: srcAudio, at: cursor)
+                do {
+                    try audioTrack.insertTimeRange(timeRange, of: srcAudio, at: cursor)
+                } catch {
+                    // 失敗したら無音で埋める
+                    audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: duration))
+                }
+            } else {
+                // 音声トラックなし: 無音で埋める
+                audioTrack.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: duration))
             }
 
             clipRanges.append(ClipRange(compositionStart: cursor, duration: duration, url: clip.url))
@@ -428,10 +430,17 @@ final class ExportEngine: ObservableObject {
         let naturalSize = try await track.load(.naturalSize)
         let preferredTransform = try await track.load(.preferredTransform)
 
-        // The "applied" size is how the video actually appears after its preferred transform
+        // preferredTransform を正規化: 回転後の原点を (0,0) に補正する
+        // iPhoneの動画は preferredTransform に translation 成分が含まれるが、
+        // そのまま scale と連結すると translation もスケールされてずれる
         let applied = naturalSize.applying(preferredTransform)
         let srcW = abs(applied.width)
         let srcH = abs(applied.height)
+
+        // preferredTransform 適用後の矩形の origin を (0,0) にする補正 translation
+        let appliedRect = CGRect(origin: .zero, size: naturalSize).applying(preferredTransform)
+        let normalizedTransform = preferredTransform
+            .concatenating(CGAffineTransform(translationX: -appliedRect.origin.x, y: -appliedRect.origin.y))
 
         let outW = renderSize.width
         let outH = renderSize.height
@@ -446,9 +455,11 @@ final class ExportEngine: ObservableObject {
         let tx = (outW - scaledW) / 2.0
         let ty = (outH - scaledH) / 2.0
 
-        // Final transform: first apply the video's preferred transform (rotation etc.),
-        // then scale to cover, then translate to center
-        let cropTransform = preferredTransform
+        // Final transform:
+        // 1. preferredTransform で回転（原点補正済み）→ srcW x srcH の正しい向きに
+        // 2. scale で renderSize を埋めるサイズに拡縮
+        // 3. translate でセンタリング
+        let cropTransform = normalizedTransform
             .concatenating(CGAffineTransform(scaleX: scale, y: scale))
             .concatenating(CGAffineTransform(translationX: tx, y: ty))
 

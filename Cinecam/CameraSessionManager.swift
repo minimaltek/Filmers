@@ -147,6 +147,7 @@ class CameraSessionManager: NSObject, ObservableObject {
     @Published var transferProgress: [String: Double] = [:]  // [PeerID: Progress]
     @Published var totalExpectedFiles = 0
     @Published var receivedFiles = 0
+    private var transferTimeoutWork: DispatchWorkItem?
     
     // カメラ起動状態
     @Published var isCameraReady = false                // カメラが起動済みかどうか
@@ -341,6 +342,28 @@ class CameraSessionManager: NSObject, ObservableObject {
     /// ★ 必ずメインスレッドから呼ぶこと
     private func handleConfirmedDisconnect(peerName: String, peerID: MCPeerID) {
         addLog("Disconnected: \(peerName)")
+        
+        // 転送中にピアが切断された場合、期待ファイル数を調整する
+        // （切断されたピアからのファイルは到着しないため）
+        if isTransferring {
+            // 切断されたピアのファイルを受信済みか確認
+            let sid = sessionID
+            let alreadyReceived = recordedVideos[sid]?.keys.contains(peerName) == true
+            if !alreadyReceived && totalExpectedFiles > 0 {
+                totalExpectedFiles = max(totalExpectedFiles - 1, receivedFiles)
+                addLog("Transfer: adjusted expected from disconnected peer \(peerName) → \(receivedFiles)/\(totalExpectedFiles)")
+                if let sid = previewSessionID ?? (recordedVideos.keys.first) {
+                    sessionExpectedCounts[sid] = totalExpectedFiles
+                }
+                // 調整後に全ファイル揃っているか再チェック
+                checkAllVideosReceived(sessionID: sid)
+            }
+            // 全ピア切断 → 転送をリセット（スタック防止）
+            if connectedPeers.isEmpty {
+                addLog("Transfer: all peers disconnected – resetting transfer state")
+                isTransferring = false
+            }
+        }
         
         let isActive = (cameraManager?.isRecording == true)
             || isTransferring
@@ -1612,6 +1635,18 @@ class CameraSessionManager: NSObject, ObservableObject {
             #if DEBUG
             print("📹 [VideoTransfer] Transfer state updated: \(self.receivedFiles)/\(self.totalExpectedFiles)")
             #endif
+            
+            // 転送タイムアウト（3分）: スタック防止
+            self.transferTimeoutWork?.cancel()
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, self.isTransferring else { return }
+                self.addLog("Transfer timeout – resetting transfer state")
+                self.isTransferring = false
+                // タイムアウト後に全ファイル揃っていればプレビューへ遷移
+                self.checkAllVideosReceived(sessionID: sessionID)
+            }
+            self.transferTimeoutWork = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 180, execute: timeout)
         }
         
         for (index, peer) in connectedPeers.enumerated() {
@@ -1667,11 +1702,13 @@ class CameraSessionManager: NSObject, ObservableObject {
             }
             #endif
 
-            if videos.count == expectedCount {
+            if videos.count >= expectedCount {
                 self.addLog("All videos received for session: \(sessionID)")
 
                 // Transfer complete flag
                 self.isTransferring = false
+                self.transferTimeoutWork?.cancel()
+                self.transferTimeoutWork = nil
 
                 // Clear session expected count (release memory)
                 self.sessionExpectedCounts.removeValue(forKey: sessionID)
