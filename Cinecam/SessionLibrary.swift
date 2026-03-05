@@ -30,6 +30,10 @@ struct SessionRecord: Identifiable, Codable, Equatable {
     var desiredOrientation: String?
     /// ロックされたデバイス名の一覧
     var lockedDevices: [String]?
+    /// 選択中の音声デバイス（nil = 編集に従う）
+    var selectedAudioDevice: String?
+    /// 選択中の映像フィルタ（CIFilter名、nil = なし）
+    var selectedVideoFilter: String?
 
     /// URL に復元した辞書
     /// パスはサンドボックス相対（ファイル名のみ）で保存し、
@@ -69,10 +73,12 @@ struct SessionRecord: Identifiable, Codable, Equatable {
         editState  = (try? c.decode([String: [SegmentState]].self, forKey: .editState)) ?? [:]
         desiredOrientation = try? c.decode(String.self, forKey: .desiredOrientation)
         lockedDevices = try? c.decode([String].self, forKey: .lockedDevices)
+        selectedAudioDevice = try? c.decode(String.self, forKey: .selectedAudioDevice)
+        selectedVideoFilter = try? c.decode(String.self, forKey: .selectedVideoFilter)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, createdAt, videoPaths, editState, desiredOrientation, lockedDevices
+        case id, title, createdAt, videoPaths, editState, desiredOrientation, lockedDevices, selectedAudioDevice, selectedVideoFilter
     }
 }
 
@@ -106,8 +112,8 @@ final class SessionLibrary: ObservableObject {
         save()
     }
 
-    /// 編集状態（セグメント + ロック）を保存する
-    func saveEditState(id: String, segmentsByDevice: [String: [ClipSegment]], lockedDevices: Set<String> = []) {
+    /// 編集状態（セグメント + ロック + 音声/フィルタ）を保存する
+    func saveEditState(id: String, segmentsByDevice: [String: [ClipSegment]], lockedDevices: Set<String> = [], audioDevice: String? = nil, videoFilter: String? = nil) {
         // レコードがまだ存在しない場合（初回撮影直後）は何もしない
         // （ContentView 側で PreviewView 表示前に add() が呼ばれているはずだが念のため）
         guard let idx = records.firstIndex(where: { $0.id == id }) else {
@@ -127,6 +133,8 @@ final class SessionLibrary: ObservableObject {
         }
         records[idx].editState = newState
         records[idx].lockedDevices = lockedDevices.isEmpty ? nil : Array(lockedDevices)
+        records[idx].selectedAudioDevice = audioDevice
+        records[idx].selectedVideoFilter = videoFilter
         save()
         #if DEBUG
         print("✅ [Library] Saved edit state for id=\(id), devices=\(newState.keys.sorted()), locked=\(lockedDevices.sorted())")

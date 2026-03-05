@@ -92,11 +92,16 @@ struct LibraryView: View {
                 onRename: { newTitle in
                     library.rename(id: record.id, title: newTitle)
                 },
-                onSaveEditState: { segmentsByDevice, lockedDevices in
-                    library.saveEditState(id: record.id, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices)
+                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter in
+                    library.saveEditState(id: record.id, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter)
                 },
                 savedEditState: record.editState,
                 savedLockedDevices: record.lockedDevices ?? [],
+                savedAudioDevice: record.selectedAudioDevice,
+                savedVideoFilter: record.selectedVideoFilter,
+                onDeleteSession: {
+                    library.delete(id: record.id)
+                },
                 desiredOrientation: VideoOrientation(rawValue: record.desiredOrientation ?? "横（シネマ）") ?? .cinema
             )
         }

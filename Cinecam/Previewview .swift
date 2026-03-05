@@ -546,11 +546,17 @@ struct PreviewView: View {
     /// タイトル変更をライブラリに通知するコールバック
     var onRename: ((String) -> Void)? = nil
     /// 編集状態の保存をライブラリに通知するコールバック
-    var onSaveEditState: ((_ segments: [String: [ClipSegment]], _ lockedDevices: Set<String>) -> Void)? = nil
+    var onSaveEditState: ((_ segments: [String: [ClipSegment]], _ lockedDevices: Set<String>, _ audioDevice: String?, _ videoFilter: String?) -> Void)? = nil
     /// 保存済みの編集状態（起動時に復元に使う）
     var savedEditState: [String: [SegmentState]] = [:]
     /// 保存済みのロック状態（起動時に復元に使う）
     var savedLockedDevices: [String] = []
+    /// 保存済みの音声デバイス（起動時に復元に使う）
+    var savedAudioDevice: String? = nil
+    /// 保存済みの映像フィルタ（起動時に復元に使う）
+    var savedVideoFilter: String? = nil
+    /// セッション削除コールバック（nil = 削除ボタン非表示）
+    var onDeleteSession: (() -> Void)? = nil
     /// 撮影時の向き設定（クロップ・エクスポートに使用）
     var desiredOrientation: VideoOrientation = .cinema
 
@@ -577,6 +583,7 @@ struct PreviewView: View {
     @State private var isPlayheadDragging: Bool = false
     @State private var showExportResult = false
     @State private var showExportError = false
+    @State private var showDeleteSessionConfirm = false
     @State private var exportedURL: URL? = nil
     /// 表示中のタイトル（タップ編集）
     @State private var currentTitle: String = ""
@@ -719,7 +726,7 @@ struct PreviewView: View {
         .onDisappear {
             // 閉じる方法に関わらず編集状態を自動保存
             // （×ボタン、マスターからの強制クローズ等すべてのケース）
-            onSaveEditState?(timeline.segmentsByDevice, timeline.lockedDevices)
+            onSaveEditState?(timeline.segmentsByDevice, timeline.lockedDevices, audioSource, selectedFilter)
             playback.teardown()
         }
         // タイトル編集：キーボードが上がっても入力欄が見えるよう専用シートで表示
@@ -781,6 +788,13 @@ struct PreviewView: View {
             }
         } message: {
             if case .failed(let msg) = exportEngine.state { Text(msg) }
+        }
+        .alert("Delete this session?", isPresented: $showDeleteSessionConfirm) {
+            Button("Delete", role: .destructive) {
+                onDeleteSession?()
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) { }
         }
     }
 
@@ -906,10 +920,10 @@ struct PreviewView: View {
                         .clipShape(Circle())
                 }
 
-                // ライブラリへ戻るボタン（onRename が設定されているときのみ表示）
-                if onRename != nil {
-                    Button(action: { dismiss() }) {
-                        Image(systemName: "square.grid.2x2")
+                // セッション削除ボタン（onDeleteSession が設定されているときのみ表示）
+                if onDeleteSession != nil {
+                    Button(action: { showDeleteSessionConfirm = true }) {
+                        Image(systemName: "trash")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(.white)
                             .frame(width: 36, height: 36)
@@ -949,7 +963,7 @@ struct PreviewView: View {
         currentTitle = trimmed.isEmpty ? "UNTITLED" : trimmed
         onRename?(currentTitle)
         // タイトル保存と同時に現在の編集状態（セグメント）も保存
-        onSaveEditState?(timeline.segmentsByDevice, timeline.lockedDevices)
+        onSaveEditState?(timeline.segmentsByDevice, timeline.lockedDevices, audioSource, selectedFilter)
         isEditingTitle = false
     }
 
@@ -2038,6 +2052,9 @@ struct PreviewView: View {
             if !savedLockedDevices.isEmpty {
                 timeline.lockedDevices = Set(savedLockedDevices)
             }
+            // 音声デバイス・フィルタを復元
+            audioSource = savedAudioDevice
+            selectedFilter = savedVideoFilter
             playback.totalDuration = timeline.totalDuration
             // 音声同期用に各デバイスの映像開始時刻を渡す
             var starts: [String: Double] = [:]

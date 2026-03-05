@@ -134,11 +134,16 @@ struct ContentView: View {
                 onRename: { newTitle in
                     library.rename(id: sessionManager.previewSessionID, title: newTitle)
                 },
-                onSaveEditState: { segmentsByDevice, lockedDevices in
-                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices)
+                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter in
+                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter)
                 },
                 savedEditState: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.editState ?? [:],
                 savedLockedDevices: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.lockedDevices ?? [],
+                savedAudioDevice: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.selectedAudioDevice,
+                savedVideoFilter: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.selectedVideoFilter,
+                onDeleteSession: {
+                    library.delete(id: sessionManager.previewSessionID)
+                },
                 desiredOrientation: cameraManager.desiredOrientation
             )
         }
@@ -234,7 +239,7 @@ struct ContentView: View {
                             .font(.system(size: 32, weight: .black, design: .default))
                             .fontWidth(.compressed)
                             .tracking(-0.5)
-                        Text("v031")
+                        Text("v033")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.5))
                     }
@@ -537,7 +542,7 @@ struct ContentView: View {
                                     .font(.system(size: 32, weight: .black, design: .default))
                                     .fontWidth(.compressed)
                                     .tracking(-0.5)
-                                Text("v031")
+                                Text("v033")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundColor(.white.opacity(0.5))
                             }

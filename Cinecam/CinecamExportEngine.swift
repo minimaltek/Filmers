@@ -260,64 +260,17 @@ final class ExportEngine: ObservableObject {
 
         videoComp.instructions = instructions
 
-        // ④-b フィルタ or 透かし付きの場合の処理分岐
-        // applyingCIFiltersWithHandler は animationTool をサポートしないため、
-        // フィルタ使用時は CIImage として透かしを合成する
-        let finalVideoComp: AVVideoComposition
-        let needsCIHandler = videoFilter != nil || showWatermark
+        // ④-b 常に videoComp（layerInstructions で回転・スケール済み）を使用。
+        //   フィルタ・透かしが必要な場合は 2パス方式:
+        //   1パス目: videoComp で回転済み中間ファイルを書き出し
+        //   2パス目: 中間ファイルに CIFilter + 透かしを適用
+        let needsSecondPass = videoFilter != nil || showWatermark
 
-        if needsCIHandler {
-            // CIFilter ハンドラーで フィルタ + 透かしを処理
-            // ★ AVVideoComposition(asset:) は sourceImage に preferredTransform を適用済み。
-            //   ここではスケール＋クロップ（renderSize へのフィット）とフィルタ適用のみ行う。
-            let size = renderSize
-            let watermarkImage = showWatermark ? Self.renderWatermarkCIImage(size: size) : nil
-
-            finalVideoComp = AVVideoComposition(asset: composition) { request in
-                var image = request.sourceImage.clampedToExtent()
-
-                // sourceImage の実サイズ（preferredTransform 適用済み）→ renderSize にカバースケール＋センタークロップ
-                let srcExtent = request.sourceImage.extent
-                if srcExtent.width > 0 && srcExtent.height > 0
-                    && (abs(srcExtent.width - size.width) > 1 || abs(srcExtent.height - size.height) > 1) {
-                    let scaleX = size.width / srcExtent.width
-                    let scaleY = size.height / srcExtent.height
-                    let scale = max(scaleX, scaleY) // cover
-                    let scaledW = srcExtent.width * scale
-                    let scaledH = srcExtent.height * scale
-                    let tx = (size.width - scaledW) / 2.0 - srcExtent.origin.x * scale
-                    let ty = (size.height - scaledH) / 2.0 - srcExtent.origin.y * scale
-                    let fitTransform = CGAffineTransform(scaleX: scale, y: scale)
-                        .concatenating(CGAffineTransform(translationX: tx, y: ty))
-                    image = image.transformed(by: fitTransform)
-                }
-
-                // renderSize でクロップ
-                image = image.cropped(to: CGRect(origin: .zero, size: size))
-
-                // 選択フィルタを適用
-                if let filterName = videoFilter, let ciFilter = CIFilter(name: filterName) {
-                    ciFilter.setValue(image, forKey: kCIInputImageKey)
-                    if let filtered = ciFilter.outputImage {
-                        image = filtered.cropped(to: CGRect(origin: .zero, size: size))
-                    }
-                }
-
-                // 透かしを合成
-                if let wm = watermarkImage {
-                    image = wm.composited(over: image)
-                }
-
-                request.finish(with: image, context: nil)
-            }
-        } else {
-            finalVideoComp = videoComp
-        }
-
-        // ⑤ Export
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cinecam_export_\(Int(Date().timeIntervalSince1970)).mp4")
-        try? FileManager.default.removeItem(at: outputURL)
+        // ⑤ Export (1パス目: 回転・クロップ済み)
+        let pass1URL = needsSecondPass
+            ? FileManager.default.temporaryDirectory.appendingPathComponent("cinecam_pass1_\(Int(Date().timeIntervalSince1970)).mp4")
+            : FileManager.default.temporaryDirectory.appendingPathComponent("cinecam_export_\(Int(Date().timeIntervalSince1970)).mp4")
+        try? FileManager.default.removeItem(at: pass1URL)
 
         guard let session = AVAssetExportSession(
             asset: composition,
@@ -326,10 +279,10 @@ final class ExportEngine: ObservableObject {
             throw ExportError.sessionFailed
         }
 
-        session.outputURL = outputURL
+        session.outputURL = pass1URL
         session.outputFileType = .mp4
-        session.videoComposition = finalVideoComp
-        session.shouldOptimizeForNetworkUse = true
+        session.videoComposition = videoComp
+        session.shouldOptimizeForNetworkUse = !needsSecondPass
 
         self.exportSession = session
 
@@ -337,7 +290,10 @@ final class ExportEngine: ObservableObject {
             while !Task.isCancelled {
                 await MainActor.run {
                     if case .exporting = self?.state {
-                        self?.state = .exporting(progress: session.progress)
+                        // 2パスの場合、1パス目は進捗の 0〜50%
+                        let raw = session.progress
+                        let adjusted = needsSecondPass ? raw * 0.5 : raw
+                        self?.state = .exporting(progress: adjusted)
                     }
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000)
@@ -349,17 +305,96 @@ final class ExportEngine: ObservableObject {
 
         switch session.status {
         case .completed:
-            return outputURL
+            break
         case .cancelled:
             throw ExportError.cancelled
         default:
             #if DEBUG
             if let err = session.error {
-                print("⚠️ [Export] session failed: \(err)")
+                print("⚠️ [Export] pass1 failed: \(err)")
                 print("⚠️ [Export] renderSize=\(renderSize), clips=\(orderedClips.count), cursor=\(CMTimeGetSeconds(cursor))s")
             }
             #endif
             throw session.error ?? ExportError.sessionFailed
+        }
+
+        // 2パス目不要ならそのまま返す
+        guard needsSecondPass else { return pass1URL }
+
+        // ⑥ 2パス目: 回転済み中間ファイルに CIFilter + 透かしを適用
+        let finalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cinecam_export_\(Int(Date().timeIntervalSince1970)).mp4")
+        try? FileManager.default.removeItem(at: finalURL)
+
+        let pass1Asset = AVURLAsset(url: pass1URL)
+        let watermarkImage = showWatermark ? Self.renderWatermarkCIImage(size: renderSize) : nil
+
+        let ciComp = try await AVMutableVideoComposition.videoComposition(
+            with: pass1Asset,
+            applyingCIFiltersWithHandler: { request in
+                var image = request.sourceImage
+
+                // フィルタ適用
+                if let filterName = videoFilter, let ciFilter = CIFilter(name: filterName) {
+                    ciFilter.setValue(image, forKey: kCIInputImageKey)
+                    if let filtered = ciFilter.outputImage {
+                        image = filtered.cropped(to: request.sourceImage.extent)
+                    }
+                }
+
+                // 透かし合成
+                if let wm = watermarkImage {
+                    image = wm.composited(over: image)
+                }
+
+                request.finish(with: image, context: nil)
+            }
+        )
+
+        guard let session2 = AVAssetExportSession(
+            asset: pass1Asset,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            try? FileManager.default.removeItem(at: pass1URL)
+            throw ExportError.sessionFailed
+        }
+
+        session2.outputURL = finalURL
+        session2.outputFileType = .mp4
+        session2.videoComposition = ciComp
+        session2.shouldOptimizeForNetworkUse = true
+
+        self.exportSession = session2
+
+        let progressTask2 = Task { [weak self] in
+            while !Task.isCancelled {
+                await MainActor.run {
+                    if case .exporting = self?.state {
+                        self?.state = .exporting(progress: 0.5 + session2.progress * 0.5)
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+
+        await session2.export()
+        progressTask2.cancel()
+
+        // 中間ファイルを削除
+        try? FileManager.default.removeItem(at: pass1URL)
+
+        switch session2.status {
+        case .completed:
+            return finalURL
+        case .cancelled:
+            throw ExportError.cancelled
+        default:
+            #if DEBUG
+            if let err = session2.error {
+                print("⚠️ [Export] pass2 failed: \(err)")
+            }
+            #endif
+            throw session2.error ?? ExportError.sessionFailed
         }
     }
 
@@ -486,8 +521,10 @@ final class ExportEngine: ObservableObject {
             )
 
             // テキスト位置（右下、マージン付き）
+            // ★ CIImage は Y-up 座標系なので、UIKit で「上側」に描画すると
+            //   CIImage では「下側」（= 動画の右下）になる
             let x = size.width - textSize.width - margin
-            let drawY = size.height - textSize.height - margin
+            let drawY = margin  // UIKit の上側 = CIImage の下側
             (text as NSString).draw(
                 at: CGPoint(x: x, y: drawY),
                 withAttributes: attributes
