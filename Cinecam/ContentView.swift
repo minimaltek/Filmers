@@ -239,7 +239,7 @@ struct ContentView: View {
                             .font(.system(size: 32, weight: .black, design: .default))
                             .fontWidth(.compressed)
                             .tracking(-0.5)
-                        Text("v033")
+                        Text("v034")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.5))
                     }
@@ -542,7 +542,7 @@ struct ContentView: View {
                                     .font(.system(size: 32, weight: .black, design: .default))
                                     .fontWidth(.compressed)
                                     .tracking(-0.5)
-                                Text("v033")
+                                Text("v034")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundColor(.white.opacity(0.5))
                             }

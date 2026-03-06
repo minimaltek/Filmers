@@ -666,6 +666,26 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
     
+    /// 露出補正値（EV）を設定
+    func setExposureBias(_ bias: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentCamera else { return }
+            let clamped = max(device.minExposureTargetBias, min(bias, device.maxExposureTargetBias))
+            do {
+                try device.lockForConfiguration()
+                device.setExposureTargetBias(clamped, completionHandler: nil)
+                device.unlockForConfiguration()
+                DispatchQueue.main.async {
+                    self.exposureBias = clamped
+                }
+            } catch {
+                #if DEBUG
+                print("⚠️ 露出補正エラー: \(error.localizedDescription)")
+                #endif
+            }
+        }
+    }
+    
     /// ホワイトバランスを更新
     private func updateWhiteBalanceMode() {
         sessionQueue.async { [weak self] in

@@ -954,13 +954,8 @@ class CameraSessionManager: NSObject, ObservableObject {
         isWaitingForCameraReady = true
         cameraReadyPeers = []
         
-        // カメラ起動時に画面回転を縦固定にする
+        // カメラ起動 → 撮影画面は傾きに追従（回転許可）
         OrientationLock.isCameraActive = true
-        
-        // 画面の向きを強制的に更新
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-            windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
-        }
         
         // 先に自分のカメラを起動（完了後にコマンド送信）
         cameraManager?.setupCamera()
@@ -1013,7 +1008,7 @@ class CameraSessionManager: NSObject, ObservableObject {
     func stopCameraAndReturnToMenu() {
         addLog("Stopping camera and returning to menu...")
         
-        // カメラ停止時に画面回転の制限を解除
+        // カメラ停止 → 接続画面に戻るので縦固定に（notifyOrientationChange で縦に戻る）
         OrientationLock.isCameraActive = false
         
         // カメラを停止
@@ -1483,13 +1478,8 @@ class CameraSessionManager: NSObject, ObservableObject {
     private func handleStartCamera(fromPeer peer: MCPeerID) {
         addLog("Starting camera for slave...")
         
-        // カメラ起動時に画面回転を縦固定にする
+        // カメラ起動 → 撮影画面は傾きに追従（回転許可）
         OrientationLock.isCameraActive = true
-        
-        // 画面の向きを強制的に更新
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-            windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
-        }
         
         // カメラをセットアップして、完了後にcamera_readyを送信
         cameraManager?.setupCamera()

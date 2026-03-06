@@ -17,6 +17,10 @@ struct CameraOverlayControls: View {
     @State private var guideMode: Int = 0
     /// マルチモニター表示フラグ
     @State private var showMultiMonitor = false
+    /// 露出ドラッグ開始時の基準値
+    @State private var exposureDragStartBias: Float = 0.0
+    /// 露出ドラッグ中フラグ（タップ誤爆防止）
+    @State private var isDraggingExposure = false
     
     private var isLandscape: Bool {
         horizontalSizeClass == .regular ||
@@ -25,6 +29,15 @@ struct CameraOverlayControls: View {
     
     var body: some View {
         ZStack {
+            // 露出ロック中: ボタン以外のエリアをタップで解除
+            if cameraManager.exposureMode == .locked {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        cameraManager.exposureMode = .continuousAutoExposure
+                    }
+            }
+            
             // Guide overlay (modes 0-2)
             if guideMode < 3 {
                 guideOverlay
@@ -87,26 +100,31 @@ struct CameraOverlayControls: View {
     private var landscapeLayout: some View {
         ZStack {
             HStack(spacing: 0) {
-                // Left side: close, torch, action safe, focus, exposure
-                VStack(alignment: .leading, spacing: 16) {
-                    closeButton
-                    if cameraManager.hasTorch {
-                        torchButton
+                // Left side: 2列レイアウト
+                // 外側列: close, torch, guide, multimonitor
+                // 内側列: focus, exposure (下寄せ)
+                HStack(alignment: .bottom, spacing: 8) {
+                    VStack(spacing: 12) {
+                        closeButton
+                        if cameraManager.hasTorch {
+                            torchButton
+                        }
+                        guideToggle
+                        multiMonitorButton
+                        Spacer()
                     }
-                    guideToggle
-                    multiMonitorButton
                     
-                    Spacer()
-                    
-                    focusLockButton
-                    exposureLockButton
-                    
-                    if cameraManager.exposureMode == .locked {
-                        exposureBiasLabel
+                    VStack(spacing: 12) {
+                        Spacer()
+                        focusLockButton
+                        exposureLockButton
+                        if cameraManager.exposureMode == .locked {
+                            exposureBiasLabel
+                        }
                     }
                 }
                 .padding(.leading, 20)
-                .padding(.vertical, 20)
+                .padding(.vertical, 12)
                 
                 Spacer()
                 
@@ -131,7 +149,7 @@ struct CameraOverlayControls: View {
             VStack {
                 Spacer()
                 recordButton
-                    .padding(.bottom, 20)
+                    .padding(.bottom, 4)
             }
             
             // Center recording timer overlay
@@ -229,15 +247,59 @@ struct CameraOverlayControls: View {
     }
     
     private var exposureLockButton: some View {
-        controlButton(
-            icon: cameraManager.exposureMode == .locked ? "sun.max.fill" : "sun.max",
-            isActive: cameraManager.exposureMode == .locked
-        ) {
-            if cameraManager.exposureMode == .locked {
-                cameraManager.exposureMode = .continuousAutoExposure
-            } else {
-                cameraManager.exposureMode = .locked
+        let isLocked = cameraManager.exposureMode == .locked
+        let hasBias = abs(cameraManager.exposureBias) > 0.05
+        return exposureButtonContent(isLocked: isLocked, hasBias: hasBias)
+            .onTapGesture(count: 2) {
+                // ダブルタップで露出補正を0にリセット
+                cameraManager.setExposureBias(0)
             }
+            .onTapGesture(count: 1) {
+                // シングルタップでロック切替
+                if !isDraggingExposure {
+                    if isLocked {
+                        cameraManager.exposureMode = .continuousAutoExposure
+                    } else {
+                        cameraManager.exposureMode = .locked
+                    }
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        if cameraManager.exposureMode == .locked {
+                            if !isDraggingExposure {
+                                exposureDragStartBias = cameraManager.exposureBias
+                                isDraggingExposure = true
+                            }
+                            let delta = Float(-value.translation.height / 80)
+                            cameraManager.setExposureBias(exposureDragStartBias + delta)
+                        }
+                    }
+                    .onEnded { _ in
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            isDraggingExposure = false
+                        }
+                    }
+            )
+    }
+    
+    /// 露出ボタンの見た目（ジェスチャーを分離するため別ビューに）
+    private func exposureButtonContent(isLocked: Bool, hasBias: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(Color.black.opacity(0.6))
+                .frame(width: 44, height: 44)
+            
+            if isLocked || hasBias {
+                Circle()
+                    .stroke(Color.yellow, lineWidth: 2)
+                    .frame(width: 44, height: 44)
+            }
+            
+            Image(systemName: isLocked ? "sun.max.fill" : "sun.max")
+                .font(.system(size: 18))
+                .foregroundColor((isLocked || hasBias) ? .yellow : .white)
         }
     }
     
@@ -315,7 +377,8 @@ struct CameraOverlayControls: View {
     // MARK: - Record Button
     
     private var recordButton: some View {
-        Button(action: {
+        let isSlave = !sessionManager.isMaster
+        return Button(action: {
             if sessionManager.isMaster {
                 if cameraManager.isRecording {
                     sessionManager.stopRecordingAll()
@@ -326,7 +389,7 @@ struct CameraOverlayControls: View {
         }) {
             ZStack {
                 Circle()
-                    .stroke(Color.white, lineWidth: 4)
+                    .stroke(isSlave ? Color.gray.opacity(0.5) : Color.white, lineWidth: 4)
                     .frame(width: 70, height: 70)
                 
                 if cameraManager.isRecording {
@@ -335,13 +398,12 @@ struct CameraOverlayControls: View {
                         .frame(width: 28, height: 28)
                 } else {
                     Circle()
-                        .fill(Color.red)
+                        .fill(isSlave ? Color.gray : Color.red)
                         .frame(width: 60, height: 60)
                 }
             }
         }
-        .disabled(sessionManager.isWaitingForReady || !sessionManager.isMaster)
-        .opacity(sessionManager.isMaster ? 1.0 : 0.5)
+        .disabled(sessionManager.isWaitingForReady || isSlave)
     }
     
     // MARK: - Guide Overlay (4-stage cycle)
