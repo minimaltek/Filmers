@@ -29,11 +29,12 @@ final class ExportEngine: ObservableObject {
 
     /// 書き出し実行 → カメラロールに保存
     /// - audioSource: nil = 編集に従う（カット毎の音声）、デバイス名 = そのデバイスの音声を全編に使用
-    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema, audioSource: String? = nil, videoFilter: String? = nil, showWatermark: Bool = false) async {
+    /// - pitchCents: ピッチシフト量（セント単位: 0 = 無効）
+    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema, audioSource: String? = nil, videoFilter: String? = nil, showWatermark: Bool = false, pitchCents: Float = 0) async {
         state = .exporting(progress: 0)
 
         do {
-            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation, audioSource: audioSource, videoFilter: videoFilter, showWatermark: showWatermark)
+            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation, audioSource: audioSource, videoFilter: videoFilter, showWatermark: showWatermark, pitchCents: pitchCents)
             // カメラロールに保存（失敗したら .done には絶対到達しない）
             do {
                 try await saveToPhotoLibrary(url: url)
@@ -86,7 +87,8 @@ final class ExportEngine: ObservableObject {
         orientation: VideoOrientation = .cinema,
         audioSource: String? = nil,
         videoFilter: String? = nil,
-        showWatermark: Bool = false
+        showWatermark: Bool = false,
+        pitchCents: Float = 0
     ) async throws -> URL {
 
         // ① 使用するセグメントを trimIn 順に並べる
@@ -208,6 +210,32 @@ final class ExportEngine: ObservableObject {
         // 音声トラックが空なら削除（空トラックがあるとエクスポートが失敗する場合がある）
         if audioTrack.timeRange.duration == .zero {
             composition.removeTrack(audioTrack)
+        }
+
+        // ③-c ピッチシフト適用: composition の音声を書き出し → オフラインピッチ処理 → 差し替え
+        if pitchCents != 0, audioTrack.timeRange.duration != .zero {
+            let pitchedURL = try await renderPitchShiftedAudio(
+                composition: composition,
+                audioTrack: audioTrack,
+                pitchCents: pitchCents
+            )
+            // 元の音声トラックを削除し、ピッチ済み音声で差し替え
+            composition.removeTrack(audioTrack)
+            let newAudioTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            )!
+            let pitchedAsset = AVURLAsset(url: pitchedURL)
+            if let pitchedSrc = try? await pitchedAsset.loadTracks(withMediaType: .audio).first {
+                let pitchedDuration = try await pitchedAsset.load(.duration)
+                try newAudioTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: pitchedDuration),
+                    of: pitchedSrc,
+                    at: .zero
+                )
+            }
+            // 一時ファイルは後で削除
+            try? FileManager.default.removeItem(at: pitchedURL)
         }
 
         // ④ Build per-clip video composition instructions
@@ -395,6 +423,107 @@ final class ExportEngine: ObservableObject {
             #endif
             throw session2.error ?? ExportError.sessionFailed
         }
+    }
+
+    // MARK: - Pitch Shift (Offline Render)
+
+    /// composition の音声トラックをピッチシフト済み M4A にオフラインレンダリングする
+    private func renderPitchShiftedAudio(
+        composition: AVMutableComposition,
+        audioTrack: AVMutableCompositionTrack,
+        pitchCents: Float
+    ) async throws -> URL {
+        // 1) composition の音声だけを一時 M4A に書き出す
+        let tempAudioURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pitch_src_\(Int(Date().timeIntervalSince1970)).m4a")
+        try? FileManager.default.removeItem(at: tempAudioURL)
+
+        // 音声だけの composition を作成
+        let audioComp = AVMutableComposition()
+        let tempTrack = audioComp.addMutableTrack(
+            withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
+        )!
+        try tempTrack.insertTimeRange(audioTrack.timeRange, of: audioTrack, at: .zero)
+
+        guard let audioExport = AVAssetExportSession(
+            asset: audioComp, presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw ExportError.sessionFailed
+        }
+        audioExport.outputURL = tempAudioURL
+        audioExport.outputFileType = .m4a
+        await audioExport.export()
+        guard audioExport.status == .completed else {
+            throw audioExport.error ?? ExportError.sessionFailed
+        }
+
+        // 2) AVAudioEngine でオフラインレンダリング（ピッチシフト適用）
+        let pitchedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pitch_out_\(Int(Date().timeIntervalSince1970)).caf")
+        try? FileManager.default.removeItem(at: pitchedURL)
+
+        // バックグラウンドで実行
+        let srcURL = tempAudioURL
+        let outURL = pitchedURL
+        let cents = pitchCents
+        try await Task.detached(priority: .userInitiated) {
+            let srcFile = try AVAudioFile(forReading: srcURL)
+            let format = srcFile.processingFormat
+            let totalFrames = srcFile.length
+
+            let engine = AVAudioEngine()
+            let player = AVAudioPlayerNode()
+            let timePitch = AVAudioUnitTimePitch()
+            timePitch.pitch = cents
+            timePitch.rate = 1.0
+
+            engine.attach(player)
+            engine.attach(timePitch)
+            engine.connect(player, to: timePitch, format: format)
+            engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+
+            // オフラインレンダリング用にマニュアルレンダリングモードで起動
+            try engine.enableManualRenderingMode(.offline, format: format,
+                                                  maximumFrameCount: 4096)
+            try engine.start()
+            player.play()
+
+            // ソースファイル全体をスケジュール
+            player.scheduleFile(srcFile, at: nil)
+
+            let outFile = try AVAudioFile(forWriting: outURL, settings: format.settings)
+            let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
+                                          frameCapacity: engine.manualRenderingMaximumFrameCount)!
+
+            // レンダリングループ
+            var framesRendered: AVAudioFramePosition = 0
+            while framesRendered < totalFrames {
+                let status = try engine.renderOffline(engine.manualRenderingMaximumFrameCount,
+                                                      to: buffer)
+                switch status {
+                case .success:
+                    try outFile.write(from: buffer)
+                    framesRendered += Int64(buffer.frameLength)
+                case .insufficientDataFromInputNode:
+                    // 入力データ待ち — 少し続ける
+                    framesRendered += Int64(buffer.frameLength)
+                case .cannotDoInCurrentContext:
+                    continue
+                case .error:
+                    throw ExportError.sessionFailed
+                @unknown default:
+                    break
+                }
+            }
+
+            engine.stop()
+            player.stop()
+        }.value
+
+        // 一時ソースファイルを削除
+        try? FileManager.default.removeItem(at: tempAudioURL)
+
+        return pitchedURL
     }
 
     // MARK: - Render Size

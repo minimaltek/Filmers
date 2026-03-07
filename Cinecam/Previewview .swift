@@ -42,6 +42,22 @@ final class PlaybackController: ObservableObject {
     /// 各デバイスの映像開始オフセット（音声同期のシークに使用）
     var videoStartByDevice: [String: Double] = [:]
 
+    // MARK: - Pitch Shift (AVAudioEngine)
+    private var audioEngine: AVAudioEngine?
+    private var playerNode: AVAudioPlayerNode?
+    private var timePitchNode: AVAudioUnitTimePitch?
+    private var audioFile: AVAudioFile?
+    /// 現在ピッチエンジンで再生中のデバイス名
+    private var pitchEngineDevice: String = ""
+    /// ピッチ値（セント単位: 0 = 無効）
+    var pitchCents: Float = 0 {
+        didSet {
+            timePitchNode?.pitch = pitchCents
+        }
+    }
+    /// エンジンが動作中か
+    private var isPitchEngineRunning: Bool { audioEngine?.isRunning ?? false }
+
     func setup(videos: [String: URL]) {
         players = videos.mapValues { AVPlayer(url: $0) }
     }
@@ -50,7 +66,179 @@ final class PlaybackController: ObservableObject {
         seekGeneration += 1   // 残留シークコールバックを無効化
         preloadedNext = nil
         players.values.forEach { $0.pause() }
+        stopPitchEngine()
         stopTimer()
+    }
+
+    // MARK: - Pitch Engine Setup / Control
+
+    /// デバイス → 抽出済み M4A URL のキャッシュ
+    private var extractedAudioByDevice: [String: URL] = [:]
+    /// 現在抽出中のデバイス（二重実行防止）
+    private var extractingDevices: Set<String> = []
+    /// 抽出完了待ちコールバック（抽出中に呼ばれた場合にキューイング）
+    private var pendingCallbacks: [String: [(URL?) -> Void]] = [:]
+    /// 音声抽出中フラグ（UI でローディング表示に使う）
+    @Published var isExtractingAudio: Bool = false
+
+    /// 動画ファイルから音声を M4A に抽出する（バックグラウンド、高速）
+    func extractAudioIfNeeded(device: String, videoURL: URL, completion: @escaping (URL?) -> Void) {
+        // キャッシュにある場合は即返す
+        if let cached = extractedAudioByDevice[device],
+           FileManager.default.fileExists(atPath: cached.path) {
+            completion(cached)
+            return
+        }
+        // 既に抽出中なら完了待ちキューに追加
+        if extractingDevices.contains(device) {
+            pendingCallbacks[device, default: []].append(completion)
+            print("[PITCH] Queued callback for \(device) (waiting for extraction)")
+            return
+        }
+        extractingDevices.insert(device)
+        isExtractingAudio = true
+
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pitch_\(device.hashValue)")
+            .appendingPathExtension("m4a")
+
+        print("[PITCH] Extracting audio for \(device)...")
+
+        // AVURLAsset / AVAssetExportSession の生成はメインスレッドをブロックするため
+        // バックグラウンドで実行する
+        Task.detached(priority: .userInitiated) { [weak self] in
+            // 前回の残りファイルを削除
+            try? FileManager.default.removeItem(at: outURL)
+
+            let asset = AVURLAsset(url: videoURL)
+            guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+                print("[PITCH] Could not create export session")
+                await MainActor.run { [weak self] in
+                    self?.extractingDevices.remove(device)
+                    self?.isExtractingAudio = !(self?.extractingDevices.isEmpty ?? true)
+                    completion(nil)
+                }
+                return
+            }
+            session.outputFileType = .m4a
+            session.outputURL = outURL
+
+            await session.export()
+            let status = session.status
+            let error = session.error
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.extractingDevices.remove(device)
+                self.isExtractingAudio = !self.extractingDevices.isEmpty
+
+                let resultURL: URL?
+                switch status {
+                case .completed:
+                    print("[PITCH] Audio extracted: \(outURL.lastPathComponent)")
+                    self.extractedAudioByDevice[device] = outURL
+                    resultURL = outURL
+                default:
+                    print("[PITCH] Export failed: \(error?.localizedDescription ?? "unknown")")
+                    resultURL = nil
+                }
+
+                // メインのコールバック
+                completion(resultURL)
+                // 待機中のコールバックも全て呼ぶ
+                if let pending = self.pendingCallbacks.removeValue(forKey: device) {
+                    for cb in pending { cb(resultURL) }
+                }
+            }
+        }
+    }
+
+    /// 抽出済み M4A ファイルでピッチエンジンをセットアップする
+    private func setupPitchEngine(for audioURL: URL) {
+        stopPitchEngine()
+
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+
+            let file = try AVAudioFile(forReading: audioURL)
+            print("[PITCH] Audio file opened: format=\(file.processingFormat), length=\(file.length)")
+
+            let engine = AVAudioEngine()
+            let player = AVAudioPlayerNode()
+            let timePitch = AVAudioUnitTimePitch()
+            timePitch.pitch = pitchCents
+            timePitch.rate = 1.0
+
+            engine.attach(player)
+            engine.attach(timePitch)
+            engine.connect(player, to: timePitch, format: file.processingFormat)
+            engine.connect(timePitch, to: engine.mainMixerNode, format: file.processingFormat)
+
+            try engine.start()
+            print("[PITCH] Engine started successfully")
+
+            self.audioEngine = engine
+            self.playerNode = player
+            self.timePitchNode = timePitch
+            self.audioFile = file
+        } catch {
+            print("[PITCH] Engine setup failed: \(error)")
+        }
+    }
+
+    /// ピッチエンジンを停止・破棄する
+    func stopPitchEngine() {
+        playerNode?.stop()
+        audioEngine?.stop()
+        audioEngine = nil
+        playerNode = nil
+        timePitchNode = nil
+        audioFile = nil
+        pitchEngineDevice = ""
+    }
+
+    /// 抽出済み一時ファイルを削除する
+    func cleanupExtractedAudio() {
+        for (_, url) in extractedAudioByDevice {
+            try? FileManager.default.removeItem(at: url)
+        }
+        extractedAudioByDevice.removeAll()
+    }
+
+    /// ピッチエンジンで指定秒から再生を開始する（audioURL は抽出済み M4A）
+    func pitchEnginePlay(from seconds: Double, audioURL: URL, device: String) {
+        guard pitchCents != 0 else { return }
+
+        if pitchEngineDevice != device || audioEngine == nil {
+            setupPitchEngine(for: audioURL)
+            pitchEngineDevice = device
+        }
+        guard let file = audioFile, let player = playerNode else {
+            print("[PITCH] pitchEnginePlay: file or player is nil — setup likely failed")
+            return
+        }
+
+        player.stop()
+        let sampleRate = file.processingFormat.sampleRate
+        let startFrame = AVAudioFramePosition(seconds * sampleRate)
+        let totalFrames = file.length
+        guard startFrame >= 0, startFrame < totalFrames else {
+            print("[PITCH] pitchEnginePlay: startFrame=\(startFrame) out of range (total=\(totalFrames))")
+            return
+        }
+        let frameCount = AVAudioFrameCount(totalFrames - startFrame)
+        guard frameCount > 0 else { return }
+
+        player.scheduleSegment(file, startingFrame: startFrame, frameCount: frameCount, at: nil)
+        player.play()
+        print("[PITCH] Playing from \(seconds)s (frame \(startFrame)), \(frameCount) frames, pitch=\(pitchCents) cents")
+    }
+
+    /// ピッチエンジンの再生を一時停止する
+    func pitchEnginePause() {
+        playerNode?.stop()
     }
 
     // MARK: - Audio Source Sync
@@ -243,6 +431,7 @@ final class PlaybackController: ObservableObject {
         stopTimer()
         pauseAllPlayers()
         pauseAudioSource()  // 音声ソースも停止（巻き戻し時は全停止）
+        pitchEnginePause()  // ピッチエンジンも停止
         // seekGeneration を上げて残留コールバックを無効化
         seekGeneration += 1
         let generation = seekGeneration
@@ -286,6 +475,7 @@ final class PlaybackController: ObservableObject {
             isPlaying = false
             pauseAllPlayers()
             pauseAudioSource()
+            pitchEnginePause()
             stopTimer()
         }
         seekGeneration += 1
@@ -313,6 +503,7 @@ final class PlaybackController: ObservableObject {
             isPlaying = false
             pauseAllPlayers()
             pauseAudioSource()
+            pitchEnginePause()
             stopTimer()
         }
         // 末尾セグメントの1フレーム手前にシーク（trimOut ぴったりだと範囲外扱いになるため）
@@ -349,6 +540,7 @@ final class PlaybackController: ObservableObject {
             preloadedNext = nil
             pauseAllPlayers()
             pauseAudioSource()
+            pitchEnginePause()
             stopTimer()
         } else {
             guard totalDuration > 0 else { return }
@@ -442,6 +634,11 @@ final class PlaybackController: ObservableObject {
             now < $0.seg.sourceOutTime
         }) else {
             // セグメントが見つからない → 次セグメントへ / 黒画面 / 終了
+            #if DEBUG
+            let deviceSegs = allSegments.filter { $0.device == activePreviewDevice }
+            let ranges = deviceSegs.map { "[\($0.seg.sourceInTime)...\($0.seg.sourceOutTime)]" }.joined(separator: ", ")
+            print("[TICK] No segment found: device=\(activePreviewDevice) now=\(now) playhead=\(playheadTime) segs=\(ranges)")
+            #endif
             isSeeking = true
             if let next = allSegments.first(where: { $0.seg.trimIn > playheadTime }) {
                 let gap = next.seg.trimIn - playheadTime
@@ -735,6 +932,21 @@ struct PreviewView: View {
             }
         }
         .background(Color.black.ignoresSafeArea())
+        .overlay {
+            // ピッチ音声準備中フルスクリーンオーバーレイ
+            if playback.isExtractingAudio {
+                Color.black.opacity(0.6)
+                    .ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(2.0)
+                    Text("Preparing audio...")
+                        .font(.system(size: 15, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.9))
+                }
+            }
+        }
         .task {
             currentTitle = sessionTitle
             try? await Task.sleep(nanoseconds: 400_000_000)
@@ -745,6 +957,7 @@ struct PreviewView: View {
             // （×ボタン、マスターからの強制クローズ等すべてのケース）
             onSaveEditState?(timeline.segmentsByDevice, timeline.lockedDevices, audioSource, selectedFilter)
             playback.teardown()
+            playback.cleanupExtractedAudio()
         }
         // タイトル編集：キーボードが上がっても入力欄が見えるよう専用シートで表示
         .sheet(isPresented: $isEditingTitle) {
@@ -777,6 +990,11 @@ struct PreviewView: View {
             playback.tick(allSegments: allSegmentsSorted(), totalDuration: totalDuration)
             // 音声ソースデバイスを再生位置に同期（再生中・停止中ともに）
             playback.syncAudioSource(playheadTime: playback.playheadTime)
+        }
+        // デバイス切替時にピッチエンジンを再起動（「編集に従う」モードのみ）
+        .onChange(of: playback.activePreviewDevice) { device in
+            guard pitchShiftCents != 0, audioSource == nil, playback.isPlaying, !device.isEmpty else { return }
+            startPitchEngineIfNeeded()
         }
         .onChange(of: exportEngine.state) { state in
             if case .done(let url) = state {
@@ -845,6 +1063,8 @@ struct PreviewView: View {
                             .frame(width: boxW, height: boxH)
                             .allowsHitTesting(false)
                     }
+
+                    
                 }
                 .frame(width: boxW, height: boxH)
                 .clipped()
@@ -951,7 +1171,7 @@ struct PreviewView: View {
 
                 // 書き出しボタン
                 Button {
-                    Task { await exportEngine.export(timeline: timeline, videos: videos, orientation: desiredOrientation, audioSource: audioSource, videoFilter: selectedFilter, showWatermark: true) }  // TestFlight: 常に透かし表示（課金実装時に !purchaseManager.isPremium に戻す）
+                    Task { await exportEngine.export(timeline: timeline, videos: videos, orientation: desiredOrientation, audioSource: audioSource, videoFilter: selectedFilter, showWatermark: true, pitchCents: pitchShiftCents) }  // TestFlight: 常に透かし表示（課金実装時に !purchaseManager.isPremium に戻す）
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 18, weight: .semibold))
@@ -1558,6 +1778,12 @@ struct PreviewView: View {
                 // 左グループ：ピッチ + 音声ソース
                 HStack(spacing: 20) {
                     Button {
+                        // 再生中なら停止してからシートを開く
+                        if playback.isPlaying {
+                            playback.togglePlayback(allSegments: allSegmentsSorted(), totalDuration: totalDuration)
+                            playback.pauseAudioSource()
+                            playback.pitchEnginePause()
+                        }
                         showPitchShiftSheet = true
                     } label: {
                         Image(systemName: "mic.fill")
@@ -1583,8 +1809,10 @@ struct PreviewView: View {
                     playback.togglePlayback(allSegments: allSegmentsSorted(), totalDuration: totalDuration)
                     if playback.isPlaying {
                         playback.startAudioSource(playheadTime: playback.playheadTime)
+                        startPitchEngineIfNeeded()
                     } else {
                         playback.pauseAudioSource()
+                        playback.pitchEnginePause()
                     }
                 }) {
                     Image(systemName: playback.isPlaying ? "pause.circle.fill" : "play.circle.fill")
@@ -1626,6 +1854,13 @@ struct PreviewView: View {
                 ForEach(Self.pitchPresets, id: \.cents) { preset in
                     Button {
                         pitchShiftCents = preset.cents
+                        applyPitchShift()
+                        // ピッチ選択時に即座に音声抽出を開始（シート閉じるアニメーション中に抽出進行）
+                        if preset.cents != 0 {
+                            for (device, url) in videos {
+                                playback.extractAudioIfNeeded(device: device, videoURL: url) { _ in }
+                            }
+                        }
                         showPitchShiftSheet = false
                     } label: {
                         HStack {
@@ -1778,6 +2013,19 @@ struct PreviewView: View {
         }
         playback.videoStartByDevice = starts
 
+        // ピッチシフト有効時は AVPlayer を常にミュート（音声はエンジン経由）
+        if pitchShiftCents != 0 {
+            for (_, player) in playback.players {
+                player.volume = 0
+            }
+            // 音声ソースが変更されたらピッチエンジンを再起動
+            if playback.isPlaying {
+                playback.pitchEnginePause()
+                startPitchEngineIfNeeded()
+            }
+            return
+        }
+
         if let source = audioSource {
             // 特定デバイスの音声のみ再生
             for (device, player) in playback.players {
@@ -1792,6 +2040,61 @@ struct PreviewView: View {
             }
             // 音声ソース用に再生中だったプレイヤーを停止
             playback.pauseAudioSource()
+        }
+    }
+
+    // MARK: - Pitch Shift Control
+
+    /// ピッチシフトの設定を PlaybackController に反映し、AVPlayer のボリュームを制御する
+    private func applyPitchShift() {
+        playback.pitchCents = pitchShiftCents
+        if pitchShiftCents != 0 {
+            // ピッチエンジン使用時: AVPlayer の全プレイヤーをミュート
+            for (_, player) in playback.players {
+                player.volume = 0
+            }
+            // 音声抽出は再生開始時に行う（ここでは設定だけ保存）
+        } else {
+            // ピッチなし: エンジン停止し、AVPlayer のボリュームを元に戻す
+            playback.pitchEnginePause()
+            playback.stopPitchEngine()
+            applyAudioSource()  // audioSource の設定に従ってボリュームを復元
+        }
+    }
+
+    /// 音声ソースの設定に従ってピッチエンジンで再生開始する
+    /// - audioSource が設定されている場合はそのデバイスの音声を使用
+    /// - nil（編集に従う）の場合は activePreviewDevice の音声を使用
+    private func startPitchEngineIfNeeded() {
+        guard pitchShiftCents != 0 else { return }
+        // 音声ソースデバイスの決定
+        let audioDevice = audioSource ?? playback.activePreviewDevice
+        guard !audioDevice.isEmpty, let videoURL = videos[audioDevice] else {
+            print("[PITCH] startPitchEngineIfNeeded: no device or URL (audio='\(audioSource ?? "nil")', active='\(playback.activePreviewDevice)')")
+            return
+        }
+        let videoStart = timeline.videoRangeByDevice[audioDevice]?.start ?? 0
+        let sourceTime = playback.playheadTime - videoStart
+        guard sourceTime >= 0 else {
+            print("[PITCH] startPitchEngineIfNeeded: sourceTime < 0")
+            return
+        }
+        print("[PITCH] startPitchEngineIfNeeded: device=\(audioDevice) sourceTime=\(sourceTime)")
+        // 音声を非同期で抽出し、完了後にエンジンで再生開始
+        playback.extractAudioIfNeeded(device: audioDevice, videoURL: videoURL) { [weak playback] audioURL in
+            guard let playback else {
+                print("[PITCH] callback: playback is nil")
+                return
+            }
+            guard let audioURL else {
+                print("[PITCH] callback: audioURL is nil")
+                return
+            }
+            guard playback.isPlaying else {
+                print("[PITCH] callback: not playing, skipping")
+                return
+            }
+            playback.pitchEnginePlay(from: sourceTime, audioURL: audioURL, device: audioDevice)
         }
     }
 
