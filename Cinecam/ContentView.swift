@@ -134,13 +134,20 @@ struct ContentView: View {
                 onRename: { newTitle in
                     library.rename(id: sessionManager.previewSessionID, title: newTitle)
                 },
-                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter in
-                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter)
+                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter, pitchCents, kaleidoscope, kSize, kCX, kCY, tH, speed, segFilterSettings in
+                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter, pitchCents: pitchCents, kaleidoscope: kaleidoscope, kaleidoscopeSize: kSize, kaleidoscopeCenterX: kCX, kaleidoscopeCenterY: kCY, tileHeight: tH, playbackSpeed: speed, segmentFilterSettings: segFilterSettings)
                 },
                 savedEditState: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.editState ?? [:],
                 savedLockedDevices: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.lockedDevices ?? [],
                 savedAudioDevice: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.selectedAudioDevice,
                 savedVideoFilter: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.selectedVideoFilter,
+                savedPitchCents: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.pitchShiftCents ?? 0,
+                savedKaleidoscope: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.selectedKaleidoscope,
+                savedKaleidoscopeSize: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.kaleidoscopeSize ?? 200,
+                savedKaleidoscopeCenterX: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.kaleidoscopeCenterX ?? 0.5,
+                savedKaleidoscopeCenterY: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.kaleidoscopeCenterY ?? 0.5,
+                savedTileHeight: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.tileHeight ?? 200,
+                savedPlaybackSpeed: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.playbackSpeed ?? 1.0,
                 onDeleteSession: {
                     library.delete(id: sessionManager.previewSessionID)
                 },
@@ -352,7 +359,7 @@ struct ContentView: View {
                             score: sessionManager.deviceScore,
                             isMasterNode: selfIsMaster)
                     
-                    // 接続端末
+                    // iOS接続端末
                     ForEach(sessionManager.connectedPeerNames, id: \.self) { peerName in
                         let peerIsMaster = sessionManager.masterPeerID?.displayName == peerName
                         nodeRow(name: peerName.uppercased(), isSelf: false,
@@ -531,6 +538,8 @@ struct ContentView: View {
                     cameraManager: cameraManager,
                     sessionManager: sessionManager
                 )
+                
+
             } else {
                 // カメラ未起動時の画面（roleSelectionScreenと同じレイアウト）
                 VStack(spacing: 0) {

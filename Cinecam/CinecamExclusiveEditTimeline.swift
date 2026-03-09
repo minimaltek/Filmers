@@ -1,6 +1,19 @@
 import Foundation
 import Combine
 
+/// セグメント単位のフィルタ設定（グローバルと独立して各セグメントに適用可能）
+struct SegmentFilterSettings: Equatable {
+    var videoFilter: String? = nil
+    var kaleidoscopeType: String? = nil
+    var kaleidoscopeSize: Float = 200
+    var kaleidoscopeCenterX: Float = 0.5
+    var kaleidoscopeCenterY: Float = 0.5
+    var tileHeight: Float = 200       // TILE用の縦幅（kaleidoscopeSize が横幅）
+    var mirrorDirection: Int = 0      // MIRROR用: 0=左を反転, 1=右を反転
+    var speedRate: Float = 1.0
+    var isDefault: Bool { videoFilter == nil && kaleidoscopeType == nil && speedRate == 1.0 }
+}
+
 struct ClipSegment: Identifiable, Equatable {
     let id: UUID
     let videoDuration: Double

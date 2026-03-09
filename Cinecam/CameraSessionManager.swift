@@ -1163,13 +1163,14 @@ class CameraSessionManager: NSObject, ObservableObject {
         // → UIが即座に「準備中...」スピナーに切り替わりユーザーに応答を伝える
         isWaitingForReady = true
 
-        // スレーブが1台もいない場合はそのまま自分だけ開始
+        // iOS スレーブが1台もいない場合（ソロ）
         if connectedPeers.isEmpty {
             isWaitingForReady = false
             sessionID = pendingSessionID
-            sessionExpectedCounts[pendingSessionID] = 1  // 自分だけ
+            sessionExpectedCounts[pendingSessionID] = 1  // self only
+            
             handleStartRecording(timestamp: pendingTimestamp, sessionID: pendingSessionID)
-            addLog("Solo recording started: SessionID=\(pendingSessionID)")
+            addLog("Recording started: SessionID=\(pendingSessionID) (1 device(s))")
             return
         }
 
@@ -1220,7 +1221,7 @@ class CameraSessionManager: NSObject, ObservableObject {
 
         // ★ 録画開始の瞬間の台数を確定して記録する。
         // 転送フェーズ中に誰かが切断しても expectedCount が変わらないようにするため。
-        let participantCount = connectedPeers.count + 1  // スレーブ全員 + マスター自身
+        let participantCount = connectedPeers.count + 1  // iOS slaves + master
         sessionExpectedCounts[pendingSessionID] = participantCount
         addLog("Session \(pendingSessionID): \(participantCount)台で録画開始")
 

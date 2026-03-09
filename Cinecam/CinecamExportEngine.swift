@@ -30,11 +30,11 @@ final class ExportEngine: ObservableObject {
     /// 書き出し実行 → カメラロールに保存
     /// - audioSource: nil = 編集に従う（カット毎の音声）、デバイス名 = そのデバイスの音声を全編に使用
     /// - pitchCents: ピッチシフト量（セント単位: 0 = 無効）
-    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema, audioSource: String? = nil, videoFilter: String? = nil, showWatermark: Bool = false, pitchCents: Float = 0) async {
+    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema, audioSource: String? = nil, videoFilter: String? = nil, showWatermark: Bool = false, pitchCents: Float = 0, kaleidoscopeType: String? = nil, kaleidoscopeSize: Float = 200, kaleidoscopeCenterX: Float = 0.5, kaleidoscopeCenterY: Float = 0.5, tileHeight: Float = 200, segmentFilterSettings: [UUID: SegmentFilterSettings] = [:], speedRate: Float = 1.0) async {
         state = .exporting(progress: 0)
 
         do {
-            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation, audioSource: audioSource, videoFilter: videoFilter, showWatermark: showWatermark, pitchCents: pitchCents)
+            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation, audioSource: audioSource, videoFilter: videoFilter, showWatermark: showWatermark, pitchCents: pitchCents, kaleidoscopeType: kaleidoscopeType, kaleidoscopeSize: kaleidoscopeSize, kaleidoscopeCenterX: kaleidoscopeCenterX, kaleidoscopeCenterY: kaleidoscopeCenterY, tileHeight: tileHeight, segmentFilterSettings: segmentFilterSettings, speedRate: speedRate)
             // カメラロールに保存（失敗したら .done には絶対到達しない）
             do {
                 try await saveToPhotoLibrary(url: url)
@@ -88,7 +88,14 @@ final class ExportEngine: ObservableObject {
         audioSource: String? = nil,
         videoFilter: String? = nil,
         showWatermark: Bool = false,
-        pitchCents: Float = 0
+        pitchCents: Float = 0,
+        kaleidoscopeType: String? = nil,
+        kaleidoscopeSize: Float = 200,
+        kaleidoscopeCenterX: Float = 0.5,
+        kaleidoscopeCenterY: Float = 0.5,
+        tileHeight: Float = 200,
+        segmentFilterSettings: [UUID: SegmentFilterSettings] = [:],
+        speedRate: Float = 1.0
     ) async throws -> URL {
 
         // ① 使用するセグメントを trimIn 順に並べる
@@ -97,6 +104,7 @@ final class ExportEngine: ObservableObject {
             let sourceIn: CMTime
             let sourceOut: CMTime
             let trimIn: Double
+            let segmentID: UUID
         }
 
         var clips: [EditClip] = []
@@ -107,7 +115,8 @@ final class ExportEngine: ObservableObject {
                     url:       url,
                     sourceIn:  CMTimeMakeWithSeconds(seg.sourceInTime,  preferredTimescale: 600),
                     sourceOut: CMTimeMakeWithSeconds(seg.sourceOutTime, preferredTimescale: 600),
-                    trimIn:    seg.trimIn
+                    trimIn:    seg.trimIn,
+                    segmentID: seg.id
                 ))
             }
         }
@@ -141,6 +150,7 @@ final class ExportEngine: ObservableObject {
             let compositionStart: CMTime
             let duration: CMTime
             let url: URL
+            let segmentID: UUID
         }
         var clipRanges: [ClipRange] = []
         var cursor = CMTime.zero
@@ -155,7 +165,7 @@ final class ExportEngine: ObservableObject {
                 try videoTrack.insertTimeRange(timeRange, of: srcVideo, at: cursor)
             }
 
-            clipRanges.append(ClipRange(compositionStart: cursor, duration: duration, url: clip.url))
+            clipRanges.append(ClipRange(compositionStart: cursor, duration: duration, url: clip.url, segmentID: clip.segmentID))
             cursor = cursor + duration
         }
 
@@ -212,15 +222,73 @@ final class ExportEngine: ObservableObject {
             composition.removeTrack(audioTrack)
         }
 
-        // ③-c ピッチシフト適用: composition の音声を書き出し → オフラインピッチ処理 → 差し替え
-        if pitchCents != 0, audioTrack.timeRange.duration != .zero {
+        // ③-c スピード変更: セグメント単位で scaleTimeRange を適用
+        //     ★ ピッチシフトより先に適用する（scaleTimeRange は映像+音声両方に作用するため、
+        //       先にピッチ差し替えすると音声長のずれで scaleTimeRange が失敗する）
+        //     後ろのセグメントから処理することで、先に処理したスケーリングが後続に影響しない
+        do {
+            // 各セグメントの速度を決定（セグメント固有 > グローバル speedRate）
+            var segmentSpeeds: [(index: Int, rate: Float)] = []
+            for (i, range) in clipRanges.enumerated() {
+                let segSpeed = segmentFilterSettings[range.segmentID]?.speedRate ?? speedRate
+                if segSpeed != 1.0, segSpeed > 0 {
+                    segmentSpeeds.append((i, segSpeed))
+                }
+            }
+
+            // 後ろから処理（scaleTimeRange は時間軸を伸縮するので前から処理すると位置がずれる）
+            for (i, rate) in segmentSpeeds.sorted(by: { $0.index > $1.index }) {
+                let range = clipRanges[i]
+                // 安全チェック: composition の duration を超えないようにクランプ
+                let compDuration = composition.duration
+                let clampedStart = CMTimeMinimum(range.compositionStart, compDuration)
+                let maxDuration = compDuration - clampedStart
+                let clampedDuration = CMTimeMinimum(range.duration, maxDuration)
+
+                guard CMTimeGetSeconds(clampedDuration) > 0.001 else { continue }
+
+                let originalTimeRange = CMTimeRange(start: clampedStart, duration: clampedDuration)
+                let scaledDuration = CMTimeMultiplyByFloat64(clampedDuration, multiplier: Float64(1.0 / rate))
+                composition.scaleTimeRange(originalTimeRange, toDuration: scaledDuration)
+
+                // clipRanges を再計算: このセグメントの duration が変わり、以降のセグメントの開始位置もずれる
+                let durationDelta = scaledDuration - clampedDuration
+                clipRanges[i] = ClipRange(
+                    compositionStart: clampedStart,
+                    duration: scaledDuration,
+                    url: range.url,
+                    segmentID: range.segmentID
+                )
+                // 後続セグメントの開始位置をずらす
+                for j in (i + 1)..<clipRanges.count {
+                    let r = clipRanges[j]
+                    clipRanges[j] = ClipRange(
+                        compositionStart: r.compositionStart + durationDelta,
+                        duration: r.duration,
+                        url: r.url,
+                        segmentID: r.segmentID
+                    )
+                }
+                cursor = cursor + durationDelta
+            }
+        }
+
+        // ③-d ピッチシフト適用: composition の音声を書き出し → オフラインピッチ処理 → 差し替え
+        //     ★ scaleTimeRange 後に実行する（スピード変更済みの音声をピッチシフトする）
+        var pitchedTempURL: URL? = nil  // エクスポート完了まで削除を遅延するため保持
+        let activeAudioTracks = composition.tracks(withMediaType: .audio)
+        if pitchCents != 0, let currentAudioTrack = activeAudioTracks.first,
+           currentAudioTrack.timeRange.duration != .zero {
             let pitchedURL = try await renderPitchShiftedAudio(
                 composition: composition,
-                audioTrack: audioTrack,
+                audioTrack: currentAudioTrack,
                 pitchCents: pitchCents
             )
-            // 元の音声トラックを削除し、ピッチ済み音声で差し替え
-            composition.removeTrack(audioTrack)
+            pitchedTempURL = pitchedURL
+            // 元の音声トラックを全て削除し、ピッチ済み音声で差し替え
+            for t in composition.tracks(withMediaType: .audio) {
+                composition.removeTrack(t)
+            }
             let newAudioTrack = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
@@ -228,14 +296,17 @@ final class ExportEngine: ObservableObject {
             let pitchedAsset = AVURLAsset(url: pitchedURL)
             if let pitchedSrc = try? await pitchedAsset.loadTracks(withMediaType: .audio).first {
                 let pitchedDuration = try await pitchedAsset.load(.duration)
+                // ピッチ済み音声の長さをcompositionの映像に合わせてクランプ
+                let videoDuration = composition.duration
+                let insertDuration = CMTimeMinimum(pitchedDuration, videoDuration)
                 try newAudioTrack.insertTimeRange(
-                    CMTimeRange(start: .zero, duration: pitchedDuration),
+                    CMTimeRange(start: .zero, duration: insertDuration),
                     of: pitchedSrc,
                     at: .zero
                 )
             }
-            // 一時ファイルは後で削除
-            try? FileManager.default.removeItem(at: pitchedURL)
+            // ★ pitchedURL は AVComposition が参照しているため、ここでは削除しない
+            //   エクスポート完了後に削除する
         }
 
         // ④ Build per-clip video composition instructions
@@ -275,7 +346,7 @@ final class ExportEngine: ObservableObject {
         // 最後の instruction がコンポジション全体を確実にカバーするよう調整
         // （CMTime の丸め誤差で末尾に隙間ができると "Operation Stopped" エラーになる）
         if let lastInstr = instructions.last {
-            let compEnd = cursor  // composition の合計長
+            let compEnd = composition.duration  // scaleTimeRange 後の実際の長さを使用
             let instrEnd = lastInstr.timeRange.start + lastInstr.timeRange.duration
             if instrEnd < compEnd {
                 lastInstr.timeRange = CMTimeRange(
@@ -291,7 +362,8 @@ final class ExportEngine: ObservableObject {
         //   フィルタ・透かしが必要な場合は 2パス方式:
         //   1パス目: videoComp で回転済み中間ファイルを書き出し
         //   2パス目: 中間ファイルに CIFilter + 透かしを適用
-        let needsSecondPass = videoFilter != nil || showWatermark
+        let hasPerSegmentFilters = !segmentFilterSettings.isEmpty
+        let needsSecondPass = videoFilter != nil || kaleidoscopeType != nil || showWatermark || hasPerSegmentFilters
 
         // ⑤ Export (1パス目: 回転・クロップ済み)
         let pass1URL = needsSecondPass
@@ -330,6 +402,11 @@ final class ExportEngine: ObservableObject {
         await session.export()
         progressTask.cancel()
 
+        // 1パス目完了後にピッチ済み一時ファイルを削除（composition が参照していたため遅延削除）
+        if let pitchedURL = pitchedTempURL {
+            try? FileManager.default.removeItem(at: pitchedURL)
+        }
+
         switch session.status {
         case .completed:
             break
@@ -356,17 +433,61 @@ final class ExportEngine: ObservableObject {
         let pass1Asset = AVURLAsset(url: pass1URL)
         let watermarkImage = showWatermark ? Self.renderWatermarkCIImage(size: renderSize) : nil
 
+        // セグメントごとのフィルタ設定を時間範囲と紐付けたルックアップテーブルを構築
+        struct FilterRange {
+            let start: CMTime
+            let end: CMTime
+            let settings: SegmentFilterSettings
+        }
+        var filterRanges: [FilterRange] = []
+        for range in clipRanges {
+            let segSettings = segmentFilterSettings[range.segmentID]
+            // セグメント固有設定 > グローバル設定
+            let effective = segSettings ?? SegmentFilterSettings(
+                videoFilter: videoFilter,
+                kaleidoscopeType: kaleidoscopeType,
+                kaleidoscopeSize: kaleidoscopeSize,
+                kaleidoscopeCenterX: kaleidoscopeCenterX,
+                kaleidoscopeCenterY: kaleidoscopeCenterY,
+                tileHeight: tileHeight
+            )
+            filterRanges.append(FilterRange(
+                start: range.compositionStart,
+                end: range.compositionStart + range.duration,
+                settings: effective
+            ))
+        }
+
         let ciComp = try await AVMutableVideoComposition.videoComposition(
             with: pass1Asset,
             applyingCIFiltersWithHandler: { request in
                 var image = request.sourceImage
 
-                // フィルタ適用
-                if let filterName = videoFilter, let ciFilter = CIFilter(name: filterName) {
-                    ciFilter.setValue(image, forKey: kCIInputImageKey)
-                    if let filtered = ciFilter.outputImage {
-                        image = filtered.cropped(to: request.sourceImage.extent)
+                // request.compositionTime から該当セグメントのフィルタ設定を取得
+                let time = request.compositionTime
+                var activeSettings: SegmentFilterSettings? = nil
+                for fr in filterRanges {
+                    if time >= fr.start && time < fr.end {
+                        activeSettings = fr.settings
+                        break
                     }
+                }
+                // 最後のフレーム（境界）用フォールバック
+                if activeSettings == nil, let last = filterRanges.last, time >= last.start {
+                    activeSettings = last.settings
+                }
+
+                if let settings = activeSettings, !settings.isDefault {
+                    image = PlaybackController.applyFilters(
+                        to: image,
+                        videoFilter: settings.videoFilter,
+                        kaleidoscopeType: settings.kaleidoscopeType,
+                        kaleidoscopeSize: settings.kaleidoscopeSize,
+                        centerX: settings.kaleidoscopeCenterX,
+                        centerY: settings.kaleidoscopeCenterY,
+                        tileHeight: settings.tileHeight,
+                        mirrorDirection: settings.mirrorDirection
+                    )
                 }
 
                 // 透かし合成

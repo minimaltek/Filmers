@@ -75,7 +75,7 @@ struct LibraryView: View {
                             selectedIDs.removeAll()
                         } label: {
                             Image(systemName: "trash")
-                                .font(.system(size: 20))
+                                .font(.system(size: 15))
                         }
                         .foregroundColor(.white)
                     }
@@ -92,13 +92,20 @@ struct LibraryView: View {
                 onRename: { newTitle in
                     library.rename(id: record.id, title: newTitle)
                 },
-                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter in
-                    library.saveEditState(id: record.id, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter)
+                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter, pitchCents, kaleidoscope, kSize, kCX, kCY, tH, speed, segFilterSettings in
+                    library.saveEditState(id: record.id, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter, pitchCents: pitchCents, kaleidoscope: kaleidoscope, kaleidoscopeSize: kSize, kaleidoscopeCenterX: kCX, kaleidoscopeCenterY: kCY, tileHeight: tH, playbackSpeed: speed, segmentFilterSettings: segFilterSettings)
                 },
                 savedEditState: record.editState,
                 savedLockedDevices: record.lockedDevices ?? [],
                 savedAudioDevice: record.selectedAudioDevice,
                 savedVideoFilter: record.selectedVideoFilter,
+                savedPitchCents: record.pitchShiftCents ?? 0,
+                savedKaleidoscope: record.selectedKaleidoscope,
+                savedKaleidoscopeSize: record.kaleidoscopeSize ?? 200,
+                savedKaleidoscopeCenterX: record.kaleidoscopeCenterX ?? 0.5,
+                savedKaleidoscopeCenterY: record.kaleidoscopeCenterY ?? 0.5,
+                savedTileHeight: record.tileHeight ?? 200,
+                savedPlaybackSpeed: record.playbackSpeed ?? 1.0,
                 onDeleteSession: {
                     library.delete(id: record.id)
                 },

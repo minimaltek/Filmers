@@ -15,6 +15,44 @@ struct SegmentState: Codable, Equatable {
     var id: UUID
     var trimIn: Double
     var trimOut: Double
+    /// セグメント単位のフィルタ設定（nil = グローバル設定を使用）
+    var filterSettings: SavedSegmentFilterSettings?
+}
+
+/// SegmentFilterSettings の永続化用（Codable対応）
+struct SavedSegmentFilterSettings: Codable, Equatable {
+    var videoFilter: String?
+    var kaleidoscopeType: String?
+    var kaleidoscopeSize: Float?
+    var kaleidoscopeCenterX: Float?
+    var kaleidoscopeCenterY: Float?
+    var tileHeight: Float?
+    var mirrorDirection: Int?
+    var speedRate: Float?
+
+    init(from settings: SegmentFilterSettings) {
+        self.videoFilter = settings.videoFilter
+        self.kaleidoscopeType = settings.kaleidoscopeType
+        self.kaleidoscopeSize = settings.kaleidoscopeSize
+        self.kaleidoscopeCenterX = settings.kaleidoscopeCenterX
+        self.kaleidoscopeCenterY = settings.kaleidoscopeCenterY
+        self.tileHeight = settings.tileHeight
+        self.mirrorDirection = settings.mirrorDirection
+        self.speedRate = settings.speedRate
+    }
+
+    func toSegmentFilterSettings() -> SegmentFilterSettings {
+        SegmentFilterSettings(
+            videoFilter: videoFilter,
+            kaleidoscopeType: kaleidoscopeType,
+            kaleidoscopeSize: kaleidoscopeSize ?? 200,
+            kaleidoscopeCenterX: kaleidoscopeCenterX ?? 0.5,
+            kaleidoscopeCenterY: kaleidoscopeCenterY ?? 0.5,
+            tileHeight: tileHeight ?? 200,
+            mirrorDirection: mirrorDirection ?? 0,
+            speedRate: speedRate ?? 1.0
+        )
+    }
 }
 
 // MARK: - SessionRecord
@@ -36,6 +74,18 @@ struct SessionRecord: Identifiable, Codable, Equatable {
     var selectedVideoFilter: String?
     /// ピッチシフト値（セント単位: 0 = 無効）
     var pitchShiftCents: Float?
+    /// 万華鏡フィルタタイプ（CIFilter名、nil = なし）
+    var selectedKaleidoscope: String?
+    /// 万華鏡サイズ
+    var kaleidoscopeSize: Float?
+    /// 万華鏡中心X（0.0〜1.0）
+    var kaleidoscopeCenterX: Float?
+    /// 万華鏡中心Y（0.0〜1.0）
+    var kaleidoscopeCenterY: Float?
+    /// TILEフィルタの縦幅（kaleidoscopeSize が横幅）
+    var tileHeight: Float?
+    /// 再生スピード倍率（1.0 = 通常）
+    var playbackSpeed: Float?
 
     /// URL に復元した辞書
     /// パスはサンドボックス相対（ファイル名のみ）で保存し、
@@ -78,10 +128,16 @@ struct SessionRecord: Identifiable, Codable, Equatable {
         selectedAudioDevice = try? c.decode(String.self, forKey: .selectedAudioDevice)
         selectedVideoFilter = try? c.decode(String.self, forKey: .selectedVideoFilter)
         pitchShiftCents = try? c.decode(Float.self, forKey: .pitchShiftCents)
+        selectedKaleidoscope = try? c.decode(String.self, forKey: .selectedKaleidoscope)
+        kaleidoscopeSize = try? c.decode(Float.self, forKey: .kaleidoscopeSize)
+        kaleidoscopeCenterX = try? c.decode(Float.self, forKey: .kaleidoscopeCenterX)
+        kaleidoscopeCenterY = try? c.decode(Float.self, forKey: .kaleidoscopeCenterY)
+        tileHeight = try? c.decode(Float.self, forKey: .tileHeight)
+        playbackSpeed = try? c.decode(Float.self, forKey: .playbackSpeed)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, createdAt, videoPaths, editState, desiredOrientation, lockedDevices, selectedAudioDevice, selectedVideoFilter, pitchShiftCents
+        case id, title, createdAt, videoPaths, editState, desiredOrientation, lockedDevices, selectedAudioDevice, selectedVideoFilter, pitchShiftCents, selectedKaleidoscope, kaleidoscopeSize, kaleidoscopeCenterX, kaleidoscopeCenterY, tileHeight, playbackSpeed
     }
 }
 
@@ -115,10 +171,22 @@ final class SessionLibrary: ObservableObject {
         save()
     }
 
-    /// 編集状態（セグメント + ロック + 音声/フィルタ）を保存する
-    func saveEditState(id: String, segmentsByDevice: [String: [ClipSegment]], lockedDevices: Set<String> = [], audioDevice: String? = nil, videoFilter: String? = nil) {
-        // レコードがまだ存在しない場合（初回撮影直後）は何もしない
-        // （ContentView 側で PreviewView 表示前に add() が呼ばれているはずだが念のため）
+    /// 編集状態（セグメント + ロック + 音声/フィルタ/万華鏡/速度/ピッチ/セグメントフィルタ）を保存する
+    func saveEditState(
+        id: String,
+        segmentsByDevice: [String: [ClipSegment]],
+        lockedDevices: Set<String> = [],
+        audioDevice: String? = nil,
+        videoFilter: String? = nil,
+        pitchCents: Float = 0,
+        kaleidoscope: String? = nil,
+        kaleidoscopeSize: Float = 200,
+        kaleidoscopeCenterX: Float = 0.5,
+        kaleidoscopeCenterY: Float = 0.5,
+        tileHeight: Float = 200,
+        playbackSpeed: Float = 1.0,
+        segmentFilterSettings: [UUID: SegmentFilterSettings] = [:]
+    ) {
         guard let idx = records.firstIndex(where: { $0.id == id }) else {
             #if DEBUG
             print("⚠️ [Library] saveEditState: record not found for id=\(id)")
@@ -127,8 +195,13 @@ final class SessionLibrary: ObservableObject {
         }
         var newState: [String: [SegmentState]] = [:]
         for (device, segs) in segmentsByDevice {
-            let validSegs = segs.filter { $0.isValid }.map {
-                SegmentState(id: $0.id, trimIn: $0.trimIn, trimOut: $0.trimOut)
+            let validSegs = segs.filter { $0.isValid }.map { seg in
+                var state = SegmentState(id: seg.id, trimIn: seg.trimIn, trimOut: seg.trimOut)
+                // セグメント固有のフィルタ設定があれば保存
+                if let settings = segmentFilterSettings[seg.id], !settings.isDefault {
+                    state.filterSettings = SavedSegmentFilterSettings(from: settings)
+                }
+                return state
             }
             if !validSegs.isEmpty {
                 newState[device] = validSegs
@@ -138,6 +211,13 @@ final class SessionLibrary: ObservableObject {
         records[idx].lockedDevices = lockedDevices.isEmpty ? nil : Array(lockedDevices)
         records[idx].selectedAudioDevice = audioDevice
         records[idx].selectedVideoFilter = videoFilter
+        records[idx].pitchShiftCents = pitchCents != 0 ? pitchCents : nil
+        records[idx].selectedKaleidoscope = kaleidoscope
+        records[idx].kaleidoscopeSize = kaleidoscopeSize != 200 ? kaleidoscopeSize : nil
+        records[idx].kaleidoscopeCenterX = kaleidoscopeCenterX != 0.5 ? kaleidoscopeCenterX : nil
+        records[idx].kaleidoscopeCenterY = kaleidoscopeCenterY != 0.5 ? kaleidoscopeCenterY : nil
+        records[idx].tileHeight = tileHeight != 200 ? tileHeight : nil
+        records[idx].playbackSpeed = playbackSpeed != 1.0 ? playbackSpeed : nil
         save()
         #if DEBUG
         print("✅ [Library] Saved edit state for id=\(id), devices=\(newState.keys.sorted()), locked=\(lockedDevices.sorted())")
