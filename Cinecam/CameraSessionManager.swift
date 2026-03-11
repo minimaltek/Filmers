@@ -143,10 +143,16 @@ class CameraSessionManager: NSObject, ObservableObject {
     
     // 転送状態管理
     @Published var isTransferring = false
-    @Published var transferProgress: [String: Double] = [:]  // [PeerID: Progress]
+    @Published var transferProgress: [String: Double] = [:]  // [PeerID: fractionCompleted]
     @Published var totalExpectedFiles = 0
     @Published var receivedFiles = 0
+    @Published var currentTransferProgress: Double = 0       // 現在の転送進捗 (0.0〜1.0) — 送信 or 受信
+    @Published var transferETAString: String = ""             // 残り時間の表示文字列
     private var transferTimeoutWork: DispatchWorkItem?
+    private var receiveProgressObservation: NSKeyValueObservation?
+    private var transferProgressStartTime: Date?
+    private var sendProgressObservations: [NSKeyValueObservation] = []
+    private var isReceivingFile: Bool = false                 // 受信中フラグ（受信進捗を優先表示用）
     
     // カメラ起動状態
     @Published var isCameraReady = false                // カメラが起動済みかどうか
@@ -160,6 +166,12 @@ class CameraSessionManager: NSObject, ObservableObject {
     // カメラ起動同期用
     @Published var isWaitingForCameraReady = false      // カメラ起動待機中フラグ
     private var cameraReadyPeers: Set<MCPeerID> = []    // camera_ready を返してきたピア集合
+    
+    // MARK: - Recording Disconnect Alert
+    /// マスター: 録画中に切断されたピア名（非nil = アラート表示中）
+    @Published var recordingDisconnectPeerName: String? = nil
+    /// スレーブ: 録画中にマスターとの接続が切れた
+    @Published var lostMasterDuringRecording: Bool = false
     
     // MARK: - Multi-Monitor
     /// マルチモニター表示中フラグ
@@ -357,10 +369,27 @@ class CameraSessionManager: NSObject, ObservableObject {
             if connectedPeers.isEmpty {
                 addLog("Transfer: all peers disconnected – resetting transfer state")
                 isTransferring = false
+                cleanupTransferProgress()
             }
         }
         
-        let isActive = (cameraManager?.isRecording == true)
+        // ★ 録画中の切断検知 — UI にアラートを表示する
+        let isCurrentlyRecording = (cameraManager?.isRecording == true)
+        if isCurrentlyRecording {
+            if isMaster {
+                recordingDisconnectPeerName = peerName
+                let generator = UINotificationFeedbackGenerator()
+                generator.notificationOccurred(.error)
+                addLog("⚠️ ALERT: \(peerName) disconnected during recording!")
+            } else if connectedPeers.isEmpty {
+                lostMasterDuringRecording = true
+                let generator = UINotificationFeedbackGenerator()
+                generator.notificationOccurred(.error)
+                addLog("⚠️ ALERT: Lost master connection during recording!")
+            }
+        }
+        
+        let isActive = isCurrentlyRecording
             || isTransferring
             || isWaitingForReady
             || isTransitioningToPreview
@@ -378,6 +407,7 @@ class CameraSessionManager: NSObject, ObservableObject {
                 isCameraReady = false
                 OrientationLock.isCameraActive = false
                 cameraManager?.stopSession()
+                enableIdleTimer()
                 addLog("Camera stopped – all peers disconnected")
             }
             
@@ -633,6 +663,7 @@ class CameraSessionManager: NSObject, ObservableObject {
         peerSnapshots.removeAll()
         cameraManager?.isSnapshotEnabled = false
 
+        enableIdleTimer()
         addLog("REBUILD: all state cleared")
 
         // 3. 古いソケットが完全に解放されるまで待ってから advertiser/browser を再起動
@@ -833,6 +864,8 @@ class CameraSessionManager: NSObject, ObservableObject {
             resumeDiscoveryQuietly()
         }
         
+        enableIdleTimer()
+        
         #if DEBUG
         print("📹 [SessionManager] Cleaned up after preview – connection maintained")
         #endif
@@ -975,6 +1008,8 @@ class CameraSessionManager: NSObject, ObservableObject {
                 self.addLog("Camera ready timeout – some peers did not respond")
                 // タイムアウトしても続行（応答したピアとだけ録画）
                 self.isCameraReady = true
+            self.disableIdleTimer()
+                self.disableIdleTimer()
             }
         }
     }
@@ -1118,6 +1153,7 @@ class CameraSessionManager: NSObject, ObservableObject {
         
         isWaitingForCameraReady = false
         isCameraReady = true
+        disableIdleTimer()
         addLog("All cameras ready! Recording mode enabled.")
     }
     
@@ -1240,6 +1276,39 @@ class CameraSessionManager: NSObject, ObservableObject {
         #if DEBUG
         print("📹 [SessionManager] SessionID will be cleared after video transfer")
         #endif
+    }
+    
+    // MARK: - Idle Timer Management
+    
+    /// スリープ防止を有効にする（カメラ起動時〜プレビュー終了まで維持）
+    private func disableIdleTimer() {
+        UIApplication.shared.isIdleTimerDisabled = true
+    }
+    
+    /// スリープ防止を解除する（プレビュー終了・セッション完全終了時のみ）
+    private func enableIdleTimer() {
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+    
+    // MARK: - Recording Disconnect Alert Actions
+    
+    /// 切断アラートから全台録画停止
+    func stopRecordingFromDisconnectAlert() {
+        recordingDisconnectPeerName = nil
+        lostMasterDuringRecording = false
+        stopRecordingAll()
+    }
+    
+    /// 切断アラートを閉じて録画続行
+    func dismissDisconnectAlert() {
+        recordingDisconnectPeerName = nil
+        lostMasterDuringRecording = false
+    }
+    
+    /// スレーブ: マスター切断時にローカル録画停止
+    func stopRecordingLocally() {
+        lostMasterDuringRecording = false
+        handleStopRecording()
     }
     
     // MARK: - Private Methods
@@ -1491,6 +1560,10 @@ class CameraSessionManager: NSObject, ObservableObject {
     
     /// Stopped処理
     private func handleStopRecording() {
+        // 切断アラートをクリア
+        recordingDisconnectPeerName = nil
+        lostMasterDuringRecording = false
+        
         #if DEBUG
         print("📹 [SessionManager] handleStopRecording called")
         print("📹 [SessionManager] Current SessionID: '\(sessionID)'")
@@ -1601,6 +1674,43 @@ class CameraSessionManager: NSObject, ObservableObject {
         #endif
     }
     
+    /// 転送進捗のクリーンアップ
+    private func cleanupTransferProgress() {
+        receiveProgressObservation?.invalidate()
+        receiveProgressObservation = nil
+        transferProgressStartTime = nil
+        sendProgressObservations.forEach { $0.invalidate() }
+        sendProgressObservations.removeAll()
+        transferProgress.removeAll()
+        currentTransferProgress = 0
+        transferETAString = ""
+        isReceivingFile = false
+    }
+    
+    /// ETA計算の更新
+    private func updateTransferETA(fraction: Double) {
+        guard fraction > 0.02, let startTime = transferProgressStartTime else { return }
+        let elapsed = Date().timeIntervalSince(startTime)
+        let totalEstimated = elapsed / fraction
+        let remaining = totalEstimated - elapsed
+        
+        // 残りファイル数を考慮した全体ETA
+        let filesRemaining = totalExpectedFiles - receivedFiles
+        let perFileTime = totalEstimated
+        // 現在のファイルの残り + 残りファイル分の推定
+        let totalRemaining = remaining + (Double(max(filesRemaining - 1, 0)) * perFileTime)
+        
+        if totalRemaining > 0 && totalRemaining < 3600 {
+            let minutes = Int(totalRemaining) / 60
+            let seconds = Int(totalRemaining) % 60
+            if minutes > 0 {
+                transferETAString = "残り約 \(minutes)分\(seconds)秒"
+            } else {
+                transferETAString = "残り約 \(seconds)秒"
+            }
+        }
+    }
+    
     /// Send video file to all peers
     private func sendVideoToAllPeers(videoURL: URL, sessionID: String) {
         guard let session = session else {
@@ -1628,6 +1738,7 @@ class CameraSessionManager: NSObject, ObservableObject {
         
         DispatchQueue.main.async {
             self.isTransferring = true
+            self.cleanupTransferProgress()  // 前回のデータをリセット
             // Use count determined at recording start (prevents value fluctuation due to disconnection during transfer)
             let expectedCount = self.sessionExpectedCounts[sessionID] ?? (self.connectedPeers.count + 1)
             self.totalExpectedFiles = expectedCount
@@ -1642,6 +1753,7 @@ class CameraSessionManager: NSObject, ObservableObject {
                 guard let self, self.isTransferring else { return }
                 self.addLog("Transfer timeout – resetting transfer state")
                 self.isTransferring = false
+                self.cleanupTransferProgress()
                 // タイムアウト後に全ファイル揃っていればプレビューへ遷移
                 self.checkAllVideosReceived(sessionID: sessionID)
             }
@@ -1655,7 +1767,7 @@ class CameraSessionManager: NSObject, ObservableObject {
             #endif
             
             // Use sendResource to transfer large files
-            session.sendResource(at: videoURL,
+            let sendProgress = session.sendResource(at: videoURL,
                                 withName: fileName,
                                 toPeer: peer) { error in
                 if let error = error {
@@ -1670,6 +1782,30 @@ class CameraSessionManager: NSObject, ObservableObject {
                     #if DEBUG
                     print("✅ [VideoTransfer] \(successMsg)")
                     #endif
+                }
+            }
+            
+            // 送信進捗の監視
+            if let sendProgress = sendProgress {
+                let observation = sendProgress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        let fraction = progress.fractionCompleted
+                        self.transferProgress[peer.displayName] = fraction
+                        
+                        // 受信中でなければ送信進捗を表示に使う
+                        if !self.isReceivingFile {
+                            self.currentTransferProgress = fraction
+                            self.updateTransferETA(fraction: fraction)
+                        }
+                    }
+                }
+                DispatchQueue.main.async {
+                    self.sendProgressObservations.append(observation)
+                    // 送信開始時刻を記録（まだ未設定の場合）
+                    if self.transferProgressStartTime == nil {
+                        self.transferProgressStartTime = Date()
+                    }
                 }
             }
         }
@@ -1707,6 +1843,7 @@ class CameraSessionManager: NSObject, ObservableObject {
 
                 // Transfer complete flag
                 self.isTransferring = false
+                self.cleanupTransferProgress()
                 self.transferTimeoutWork?.cancel()
                 self.transferTimeoutWork = nil
 
@@ -1895,10 +2032,37 @@ extension CameraSessionManager: MCSessionDelegate {
     /// Resource receive started
     func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
         addLog("Receiving: \(resourceName) from \(peerID.displayName)")
+        
+        // 受信進捗の監視開始
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isReceivingFile = true
+            self.transferProgressStartTime = Date()
+            self.currentTransferProgress = 0
+            self.transferETAString = ""
+            
+            // KVO で fractionCompleted を監視（受信は送信より優先）
+            self.receiveProgressObservation?.invalidate()
+            self.receiveProgressObservation = progress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    let fraction = progress.fractionCompleted
+                    self.currentTransferProgress = fraction
+                    self.transferProgress[peerID.displayName] = fraction
+                    self.updateTransferETA(fraction: fraction)
+                }
+            }
+        }
     }
     
     /// Resource receive completed
     func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isReceivingFile = false
+            self?.receiveProgressObservation?.invalidate()
+            self?.receiveProgressObservation = nil
+        }
+        
         #if DEBUG
         print("📹 [VideoReceive] ========== RECEIVED RESOURCE ==========")
         print("📹 [VideoReceive] From: \(peerID.displayName)")

@@ -273,7 +273,7 @@ struct ContentView: View {
                             .font(.system(size: 32, weight: .black, design: .default))
                             .fontWidth(.compressed)
                             .tracking(-0.5)
-                        Text("v039")
+                        Text("v040")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.5))
                     }
@@ -737,7 +737,7 @@ struct ContentView: View {
                                     .font(.system(size: 32, weight: .black, design: .default))
                                     .fontWidth(.compressed)
                                     .tracking(-0.5)
-                                Text("v039")
+                                Text("v040")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundColor(.white.opacity(0.5))
                             }
@@ -890,6 +890,37 @@ struct ContentView: View {
                 Text("\(sessionManager.receivedFiles) / \(sessionManager.totalExpectedFiles)")
                     .font(.system(size: 24, weight: .light, design: .monospaced))
                     .foregroundColor(.orange)
+                
+                // プログレスバー（転送進捗 — 送信 or 受信）
+                if sessionManager.currentTransferProgress > 0 {
+                    VStack(spacing: 8) {
+                        GeometryReader { geometry in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Color.white.opacity(0.1))
+                                    .frame(height: 6)
+                                
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Color.orange)
+                                    .frame(width: geometry.size.width * sessionManager.currentTransferProgress, height: 6)
+                                    .animation(.linear(duration: 0.3), value: sessionManager.currentTransferProgress)
+                            }
+                        }
+                        .frame(height: 6)
+                        .padding(.horizontal, 40)
+                        
+                        Text("\(Int(sessionManager.currentTransferProgress * 100))%")
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.5))
+                    }
+                }
+                
+                // 残り時間表示
+                if !sessionManager.transferETAString.isEmpty {
+                    Text(sessionManager.transferETAString)
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundColor(.orange.opacity(0.8))
+                }
                 
                 Button(action: {
                     sessionManager.isTransferring = false

@@ -92,6 +92,10 @@ struct CameraOverlayControls: View {
             if cameraManager.isRecording {
                 centerRecordingTimer
             }
+            
+            // 録画中切断アラート
+            recordingDisconnectBanner
+            lostMasterBanner
         }
     }
     
@@ -156,6 +160,10 @@ struct CameraOverlayControls: View {
             if cameraManager.isRecording {
                 centerRecordingTimer
             }
+            
+            // 録画中切断アラート
+            recordingDisconnectBanner
+            lostMasterBanner
         }
     }
     
@@ -370,6 +378,120 @@ struct CameraOverlayControls: View {
             .background(
                 RoundedRectangle(cornerRadius: 15)
                     .fill(Color.black.opacity(0.5))
+            )
+        }
+    }
+    
+    // MARK: - Recording Disconnect Banners
+    
+    /// マスター用: スレーブが録画中に切断された時のアラートバナー
+    @ViewBuilder
+    private var recordingDisconnectBanner: some View {
+        if let peerName = sessionManager.recordingDisconnectPeerName {
+            VStack(spacing: 16) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.yellow)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(peerName)の接続が切れました")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+                        Text("録画を停止しますか？")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+                
+                HStack(spacing: 16) {
+                    Button(action: {
+                        sessionManager.stopRecordingFromDisconnectAlert()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "stop.fill")
+                            Text("STOP ALL")
+                                .font(.system(size: 15, weight: .bold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(Color.red)
+                        .cornerRadius(12)
+                    }
+                    
+                    Button(action: {
+                        sessionManager.dismissDisconnectAlert()
+                    }) {
+                        Text("CONTINUE")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 12)
+                            .background(Color.white.opacity(0.2))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.white.opacity(0.4), lineWidth: 1)
+                            )
+                    }
+                }
+            }
+            .padding(20)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.black.opacity(0.85))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.red.opacity(0.6), lineWidth: 2)
+                    )
+            )
+        }
+    }
+    
+    /// スレーブ用: マスターとの接続が録画中に切れた時のアラートバナー
+    @ViewBuilder
+    private var lostMasterBanner: some View {
+        if sessionManager.lostMasterDuringRecording {
+            VStack(spacing: 16) {
+                HStack(spacing: 8) {
+                    Image(systemName: "wifi.slash")
+                        .font(.system(size: 24))
+                        .foregroundColor(.red)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("マスターとの接続が切れました")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+                        Text("録画を停止してください")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+                
+                Button(action: {
+                    sessionManager.stopRecordingLocally()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "stop.fill")
+                        Text("STOP")
+                            .font(.system(size: 15, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 40)
+                    .padding(.vertical, 14)
+                    .background(Color.red)
+                    .cornerRadius(12)
+                }
+            }
+            .padding(20)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.black.opacity(0.85))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.red.opacity(0.6), lineWidth: 2)
+                    )
             )
         }
     }

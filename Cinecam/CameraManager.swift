@@ -824,6 +824,7 @@ class CameraManager: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.isRecording = true
             OrientationLock.isRecording = true
+            UIApplication.shared.isIdleTimerDisabled = true
             // recordingStartTime は didStartRecordingTo デリゲートで設定する
             // （実際にカメラが録画を開始した瞬間に合わせるため）
         }
@@ -856,6 +857,7 @@ class CameraManager: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.isRecording = false
             OrientationLock.isRecording = false
+            // Note: isIdleTimerDisabled は CameraSessionManager が転送完了後に解除する
             self.stopTimer()
             self.recordingDuration = 0
         }
