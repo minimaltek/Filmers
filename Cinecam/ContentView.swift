@@ -8,6 +8,7 @@
 import SwiftUI
 import Combine
 import MultipeerConnectivity
+import AVFoundation
 
 struct ContentView: View {
     @StateObject private var sessionManager = CameraSessionManager()
@@ -17,6 +18,10 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showLibrary = false
     @State private var isSingleMode = false
+    
+    // 権限チェック
+    @State private var cameraPermission: AVAuthorizationStatus = .notDetermined
+    @State private var micPermission: AVAuthorizationStatus = .notDetermined
     
     // 役割選択状態（nilなら未選択）
     @State private var selectedRole: DeviceRole? = nil
@@ -48,9 +53,14 @@ struct ContentView: View {
         .background(Color.black.ignoresSafeArea())
         .onAppear {
             setupCallbacks()
+            checkPermissions()
         }
         .onDisappear {
             cameraManager.stopSession()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            // 設定画面から戻った時に権限を再チェック
+            checkPermissions()
         }
         // beatPhase は TimelineView から算出するため Timer 不要
         .onChange(of: sessionManager.masterPeerID) { newMasterPeerID in
@@ -201,6 +211,39 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - Permission Check
+    
+    /// カメラ・マイク権限の現在の状態を取得し、未決定なら許可リクエストを出す
+    private func checkPermissions() {
+        // カメラ
+        let camStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        cameraPermission = camStatus
+        if camStatus == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    cameraPermission = AVCaptureDevice.authorizationStatus(for: .video)
+                }
+            }
+        }
+        
+        // マイク
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        micPermission = micStatus
+        if micStatus == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                DispatchQueue.main.async {
+                    micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
+                }
+            }
+        }
+    }
+    
+    /// 権限に問題があるかどうか
+    private var hasPermissionIssue: Bool {
+        cameraPermission == .denied || cameraPermission == .restricted
+        || micPermission == .denied || micPermission == .restricted
+    }
+    
     // MARK: - Setup
     
     private func setupCallbacks() {
@@ -273,7 +316,7 @@ struct ContentView: View {
                             .font(.system(size: 32, weight: .black, design: .default))
                             .fontWidth(.compressed)
                             .tracking(-0.5)
-                        Text("v040")
+                        Text("v041")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.5))
                     }
@@ -358,6 +401,78 @@ struct ContentView: View {
             }
             
             Spacer().frame(height: 20)
+            
+            // ── 権限警告 ──
+            if hasPermissionIssue {
+                VStack(spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(.yellow)
+                        Text("PERMISSION REQUIRED")
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .tracking(2)
+                            .foregroundColor(.yellow)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        if cameraPermission == .denied || cameraPermission == .restricted {
+                            HStack(spacing: 6) {
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.red.opacity(0.8))
+                                    .frame(width: 16)
+                                Text("Camera access denied")
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                        }
+                        if micPermission == .denied || micPermission == .restricted {
+                            HStack(spacing: 6) {
+                                Image(systemName: "mic.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.red.opacity(0.8))
+                                    .frame(width: 16)
+                                Text("Microphone access denied")
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                        }
+                    }
+                    
+                    Button(action: {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 12))
+                            Text("OPEN SETTINGS")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .tracking(1)
+                        }
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule().fill(Color.yellow)
+                        )
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.yellow.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.yellow.opacity(0.3), lineWidth: 1)
+                        )
+                )
+                .padding(.horizontal, 24)
+                .padding(.bottom, 12)
+            }
             
             // ── CONNECTED NODES ──
             VStack(spacing: 0) {
@@ -737,7 +852,7 @@ struct ContentView: View {
                                     .font(.system(size: 32, weight: .black, design: .default))
                                     .fontWidth(.compressed)
                                     .tracking(-0.5)
-                                Text("v040")
+                                Text("v041")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundColor(.white.opacity(0.5))
                             }
