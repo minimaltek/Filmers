@@ -110,10 +110,10 @@ class DualPreviewUIView: UIView {
         layer.addSublayer(backLayer)
         layer.addSublayer(frontLayer)
         
-        // PiP border
+        // PiP border（黒枠で角丸はみ出しを隠す + 白細線で縁取り）
         pipBorderLayer.fillColor = UIColor.clear.cgColor
-        pipBorderLayer.strokeColor = UIColor.white.withAlphaComponent(0.4).cgColor
-        pipBorderLayer.lineWidth = 1
+        pipBorderLayer.strokeColor = UIColor.black.cgColor
+        pipBorderLayer.lineWidth = 4
         layer.addSublayer(pipBorderLayer)
         
         // PiPタップ用ジェスチャー
@@ -185,9 +185,9 @@ class DualPreviewUIView: UIView {
         mainLayer.cornerRadius = 0
         mainLayer.masksToBounds = false
         
-        // PiP: 横持ちではボタン列（カメラ切替+レンズ選択）を避けて中央寄りに配置
+        // PiP: 右端寄せ（セーフエリア分だけマージン確保）
         let isLandscape = bounds.width > bounds.height
-        let pipTrailing: CGFloat = isLandscape ? 110 : 70
+        let pipTrailing: CGFloat = isLandscape ? 16 : 16
         let pipTop: CGFloat = isLandscape ? 16 : 60
         let pipX = bounds.width - pipWidth - pipTrailing
         let pipY = pipTop

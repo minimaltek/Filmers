@@ -78,10 +78,11 @@ struct SingleModeOverlayControls: View {
                 }
                 .padding(.bottom, 12)
                 
-                // Focus & Exposure locks
+                // Focus & Exposure locks + Guide toggle
                 HStack(spacing: 16) {
                     focusLockButton
                     exposureLockButton
+                    guideToggle
                 }
                 .padding(.bottom, 20)
                 
@@ -95,6 +96,21 @@ struct SingleModeOverlayControls: View {
                 recordButton
                     .padding(.bottom, 20)
             }
+            
+            // PiPワイプ左上にモードバッジ（PiP実座標に合わせて配置）
+            GeometryReader { geo in
+                let safeTop = geo.safeAreaInsets.top
+                let safeRight = geo.safeAreaInsets.trailing
+                // PiP左端 = screenWidth - pipTrailing - pipWidth
+                let pipTrailing: CGFloat = 16
+                let pipWidth: CGFloat = 120
+                let pipLeftX = geo.size.width - safeRight - pipTrailing - pipWidth
+                let pipTop: CGFloat = isLandscape ? 16 : 60
+                let badgeY = pipTop - safeTop - 6
+                modeBadge
+                    .position(x: pipLeftX + 30, y: badgeY + 12)
+            }
+            .allowsHitTesting(false)
             
             // Center recording timer overlay
             if multiCamManager.isRecording {
@@ -115,7 +131,6 @@ struct SingleModeOverlayControls: View {
                         if multiCamManager.hasTorch {
                             torchButton
                         }
-                        modeBadge
                         guideToggle
                         Spacer()
                     }
@@ -141,23 +156,43 @@ struct SingleModeOverlayControls: View {
                     }
                     
                     Spacer()
-                    
-                    cameraToggleButton
-                    if isBackActive {
-                        lensSelector(vertical: true)
-                    }
-                    
-                    Spacer()
                 }
                 .padding(.trailing, 20)
                 .padding(.vertical, 20)
             }
+            
+            // PiPワイプ左上にモードバッジ（PiP実座標に合わせて配置）
+            // 横持ちではUIViewのboundsベースなのでsafeRightは除外
+            GeometryReader { geo in
+                let safeTop = geo.safeAreaInsets.top
+                let pipTrailing: CGFloat = 16
+                let pipWidth: CGFloat = 120
+                let pipLeftX = geo.size.width - pipTrailing - pipWidth
+                let pipTop: CGFloat = 16
+                let badgeY = pipTop - safeTop - 6
+                modeBadge
+                    .position(x: pipLeftX + 68, y: badgeY + 12)
+            }
+            .allowsHitTesting(false)
             
             // Record button at bottom center
             VStack {
                 Spacer()
                 recordButton
                     .padding(.bottom, 4)
+            }
+            
+            // Lens selector at right-bottom
+            if isBackActive {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        lensSelector(vertical: false)
+                            .padding(.trailing, 16)
+                            .padding(.bottom, 12)
+                    }
+                }
             }
             
             // Center recording timer overlay
@@ -175,11 +210,8 @@ struct SingleModeOverlayControls: View {
             if multiCamManager.hasTorch {
                 torchButton
             }
-            modeBadge
             
             Spacer()
-            
-            guideToggle
         }
     }
     
@@ -560,6 +592,7 @@ struct SingleModeOverlayControls: View {
             cropW = w
             cropH = h
         }
+        
         return CGRect(x: (w - cropW) / 2, y: (h - cropH) / 2, width: cropW, height: cropH)
     }
     

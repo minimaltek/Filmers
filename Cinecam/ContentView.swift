@@ -701,7 +701,7 @@ struct ContentView: View {
                 // クロップガイド（メイン + PiP穴あけ統合）
                 GeometryReader { geo in
                     let isLandscape = geo.size.width > geo.size.height
-                    let pipTrailing: CGFloat = isLandscape ? 110 : 70
+                    let pipTrailing: CGFloat = 16
                     let pipTop: CGFloat = isLandscape ? 16 : 60
                     let pipW: CGFloat = 120
                     let pipH: CGFloat = 160
