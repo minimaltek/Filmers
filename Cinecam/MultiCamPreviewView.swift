@@ -110,10 +110,10 @@ class DualPreviewUIView: UIView {
         layer.addSublayer(backLayer)
         layer.addSublayer(frontLayer)
         
-        // PiP border（黒枠で角丸はみ出しを隠す + 白細線で縁取り）
-        pipBorderLayer.fillColor = UIColor.clear.cgColor
-        pipBorderLayer.strokeColor = UIColor.black.cgColor
-        pipBorderLayer.lineWidth = 4
+        // PiP border（黒フレームで角丸の隙間を隠す）
+        pipBorderLayer.fillColor = UIColor.black.cgColor
+        pipBorderLayer.strokeColor = UIColor.clear.cgColor
+        pipBorderLayer.lineWidth = 0
         layer.addSublayer(pipBorderLayer)
         
         // PiPタップ用ジェスチャー
@@ -197,9 +197,18 @@ class DualPreviewUIView: UIView {
         pipLayer.masksToBounds = true
         currentPipFrame = pipFrame
         
-        // PiP border
-        let borderPath = UIBezierPath(roundedRect: pipFrame, cornerRadius: pipCornerRadius)
-        pipBorderLayer.path = borderPath.cgPath
+        // PiP border: 角丸の隙間を確実に覆うため、外枠パスから内枠パスを切り抜いたフレーム型にする
+        let outerInset: CGFloat = -6  // 外側に6pt広げる
+        let outerRect = pipFrame.insetBy(dx: outerInset, dy: outerInset)
+        let outerPath = UIBezierPath(roundedRect: outerRect, cornerRadius: pipCornerRadius + abs(outerInset))
+        // 内枠を1pt内側に縮めて角丸の隙間を確実に覆う
+        let innerRect = pipFrame.insetBy(dx: 1, dy: 1)
+        let innerPath = UIBezierPath(roundedRect: innerRect, cornerRadius: pipCornerRadius - 1)
+        outerPath.append(innerPath.reversing())
+        pipBorderLayer.path = outerPath.cgPath
+        pipBorderLayer.fillColor = UIColor.black.cgColor
+        pipBorderLayer.strokeColor = UIColor.clear.cgColor
+        pipBorderLayer.lineWidth = 0
         pipBorderLayer.frame = bounds
         
         // Z-order: main behind, pip on top, border on very top

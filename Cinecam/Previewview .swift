@@ -2303,8 +2303,10 @@ struct PreviewView: View {
                 playback.isTrimming = true
                 timeline.moveTrimOut(segmentID: segID, device: device, newTrimOut: newSec)
                 let actual = timeline.segments(for: device).first(where: { $0.id == segID })?.trimOut ?? newSec
-                playback.playheadTime = actual
-                playback.throttledSeekForTrim(to: actual, timeline: timeline, selectedDevice: device)
+                // 終端ちょうどだと真っ暗になるため、1フレーム(1/30s)手前をプレビュー
+                let previewTime = max(actual - 1.0 / 30.0, 0)
+                playback.playheadTime = previewTime
+                playback.throttledSeekForTrim(to: previewTime, timeline: timeline, selectedDevice: device)
             },
             onCommitSelection: { trimIn, trimOut in
                 timeline.applySelection(trimIn: trimIn, trimOut: trimOut, for: device)
@@ -3915,10 +3917,24 @@ struct PreviewView: View {
             let t = CMTimeMakeWithSeconds(total * Double(i) / Double(max(count - 1, 1)),
                                           preferredTimescale: 600)
             if let cg = try? await gen.image(at: t).image {
-                images.append(UIImage(cgImage: cg))
+                images.append(Self.centerCropToSquare(cgImage: cg))
             }
         }
         return images
+    }
+
+    /// CGImage をセンタークロップで正方形に切り抜く
+    private static func centerCropToSquare(cgImage: CGImage) -> UIImage {
+        let w = cgImage.width
+        let h = cgImage.height
+        let side = min(w, h)
+        let x = (w - side) / 2
+        let y = (h - side) / 2
+        let cropRect = CGRect(x: x, y: y, width: side, height: side)
+        if let cropped = cgImage.cropping(to: cropRect) {
+            return UIImage(cgImage: cropped)
+        }
+        return UIImage(cgImage: cgImage)
     }
 }
 

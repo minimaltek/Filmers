@@ -359,12 +359,14 @@ final class ExportEngine: ObservableObject {
 
         videoComp.instructions = instructions
 
-        // ④-b 常に videoComp（layerInstructions で回転・スケール済み）を使用。
-        //   フィルタ・透かしが必要な場合は 2パス方式:
-        //   1パス目: videoComp で回転済み中間ファイルを書き出し
-        //   2パス目: 中間ファイルに CIFilter + 透かしを適用
+        // ④-b 透かし: CALayer 方式で Pass 1 に焼き込む
+        if showWatermark {
+            Self.applyWatermarkLayer(to: videoComp, renderSize: renderSize)
+        }
+
+        // ④-c フィルタが必要な場合のみ 2パス方式
         let hasPerSegmentFilters = !segmentFilterSettings.isEmpty
-        let needsSecondPass = videoFilter != nil || kaleidoscopeType != nil || showWatermark || hasPerSegmentFilters
+        let needsSecondPass = videoFilter != nil || kaleidoscopeType != nil || hasPerSegmentFilters
 
         // ⑤ Export (1パス目: 回転・クロップ済み)
         let pass1URL = needsSecondPass
@@ -432,7 +434,6 @@ final class ExportEngine: ObservableObject {
         try? FileManager.default.removeItem(at: finalURL)
 
         let pass1Asset = AVURLAsset(url: pass1URL)
-        let watermarkImage = showWatermark ? Self.renderWatermarkCIImage(size: renderSize) : nil
 
         // セグメントごとのフィルタ設定を時間範囲と紐付けたルックアップテーブルを構築
         struct FilterRange {
@@ -497,11 +498,6 @@ final class ExportEngine: ObservableObject {
                         mirrorDirection: settings.mirrorDirection,
                         rotationAngle: angle
                     )
-                }
-
-                // 透かし合成
-                if let wm = watermarkImage {
-                    image = wm.composited(over: image)
                 }
 
                 request.finish(with: image, context: nil)
@@ -743,54 +739,55 @@ final class ExportEngine: ObservableObject {
         return cropTransform
     }
 
-    // MARK: - Watermark
+    // MARK: - Watermark (CALayer 方式)
 
-    /// 透かし用の CIImage を生成（右下に「CINECAM.」ロゴテキスト）
-    /// 接続画面と同じフォントスタイル（black weight, compressed width）を使用
-    /// renderSize に合わせてフォントサイズを自動調整する
-    private static func renderWatermarkCIImage(size: CGSize) -> CIImage? {
-        let fontSize = max(size.width * 0.03, 16)
-        let margin = size.width * 0.025
-
-        // 接続画面と同じ compressed black フォント
-        let fontDescriptor = UIFont.systemFont(ofSize: fontSize, weight: .black).fontDescriptor
-            .withDesign(.default)!
-            .withSymbolicTraits(.traitCondensed)!
-        let font = UIFont(descriptor: fontDescriptor, size: fontSize)
-
-        let text = "CINECAM."
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: UIColor.white.withAlphaComponent(0.5),
-            .kern: -0.5 as NSNumber,
-        ]
-        let textSize = (text as NSString).size(withAttributes: attributes)
-
-        // 影付きでテキストを描画
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let uiImage = renderer.image { ctx in
-            let context = ctx.cgContext
-
-            // 影を設定
-            context.setShadow(
-                offset: CGSize(width: 1, height: -1),
-                blur: 3,
-                color: UIColor.black.withAlphaComponent(0.7).cgColor
-            )
-
-            // テキスト位置（右下、マージン付き）
-            // ★ CIImage は Y-up 座標系なので、UIKit で「上側」に描画すると
-            //   CIImage では「下側」（= 動画の右下）になる
-            let x = size.width - textSize.width - margin
-            let drawY = margin  // UIKit の上側 = CIImage の下側
-            (text as NSString).draw(
-                at: CGPoint(x: x, y: drawY),
-                withAttributes: attributes
-            )
+    /// AVVideoComposition に CALayer ベースの透かしロゴを追加する
+    /// AVVideoCompositionCoreAnimationTool を使用し、確実に映像に焼き込む
+    private static func applyWatermarkLayer(to videoComp: AVMutableVideoComposition, renderSize: CGSize) {
+        // ロゴ画像読み込み（Image Set → バンドル直接のフォールバック）
+        let logo: UIImage? = UIImage(named: "WatermarkLogo")
+            ?? Bundle.main.url(forResource: "Cinecam_logo_white", withExtension: "png")
+                .flatMap { try? Data(contentsOf: $0) }
+                .flatMap { UIImage(data: $0) }
+        guard let logo, let logoCGImage = logo.cgImage else {
+            print("⚠️ [Watermark] Logo image not found")
+            return
         }
 
-        guard let cgImage = uiImage.cgImage else { return nil }
-        return CIImage(cgImage: cgImage)
+        let margin = renderSize.width * 0.025
+        let logoTargetWidth = renderSize.width * 0.08
+        let logoScale = logoTargetWidth / logo.size.width
+        let logoW = logo.size.width * logoScale
+        let logoH = logo.size.height * logoScale
+
+        // ロゴレイヤー（右下配置、CALayer は左下原点）
+        let logoLayer = CALayer()
+        logoLayer.contents = logoCGImage
+        logoLayer.opacity = 0.35
+        logoLayer.shadowColor = UIColor.black.cgColor
+        logoLayer.shadowOffset = CGSize(width: 1, height: -1)
+        logoLayer.shadowOpacity = 0.7
+        logoLayer.shadowRadius = 3
+        logoLayer.frame = CGRect(
+            x: renderSize.width - logoW - margin,
+            y: margin,  // CALayer: 左下原点 → y=margin で右下に配置
+            width: logoW,
+            height: logoH
+        )
+
+        // 親レイヤー + ビデオレイヤー
+        let videoLayer = CALayer()
+        videoLayer.frame = CGRect(origin: .zero, size: renderSize)
+
+        let parentLayer = CALayer()
+        parentLayer.frame = CGRect(origin: .zero, size: renderSize)
+        parentLayer.addSublayer(videoLayer)
+        parentLayer.addSublayer(logoLayer)
+
+        videoComp.animationTool = AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: videoLayer,
+            in: parentLayer
+        )
     }
 
     // MARK: - Errors

@@ -41,8 +41,7 @@ struct SettingsView: View {
     @AppStorage("cinecam.userName") private var userName: String = UIDevice.current.name
     /// 編集中の一時テキスト
     @State private var userNameDraft: String = ""
-    /// 名前変更後に再起動が必要な旨を通知するアラート
-    @State private var showRestartAlert = false
+
 
     var body: some View {
         NavigationView {
@@ -59,17 +58,16 @@ struct SettingsView: View {
                                     let trimmed = userNameDraft.trimmingCharacters(in: .whitespaces)
                                     guard !trimmed.isEmpty else { return }
                                     userName = trimmed
-                                    showRestartAlert = true
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .tint(.cyan)
+                                .tint(.blue)
                             }
                         }
                         .listRowBackground(Color.white.opacity(0.08))
                     } header: {
                         Text("User Name")
                     } footer: {
-                        Text("This name will be shown on other devices' timelines. Restart the app after changing.")
+                        Text("This name will be shown on other devices' timelines.")
                             .font(.caption)
                     }
 
@@ -152,11 +150,7 @@ struct SettingsView: View {
             .onDisappear {
                 applySettings()
             }
-            .alert("Restart Required", isPresented: $showRestartAlert) {
-                Button("OK") { }
-            } message: {
-                Text("User name \"\(userName)\" has been saved. It will take effect on the next app launch.")
-            }
+
         }
         .preferredColorScheme(.dark)
     }
