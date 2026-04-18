@@ -1,6 +1,6 @@
 //
 //  LibraryView.swift
-//  Cinecam
+//  Douki
 //
 //  撮影済みセッションの一覧画面
 //

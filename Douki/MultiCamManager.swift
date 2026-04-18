@@ -1,6 +1,6 @@
 //
 //  MultiCamManager.swift
-//  Cinecam
+//  Douki
 //
 //  Single-device dual-camera recording using AVCaptureMultiCamSession
 //
@@ -38,7 +38,7 @@ class MultiCamManager: NSObject, ObservableObject {
     
     // MARK: - Internal State
     private var multiCamSession: AVCaptureMultiCamSession?
-    private let sessionQueue = DispatchQueue(label: "com.cinecam.multiCamSession", qos: .default)
+    private let sessionQueue = DispatchQueue(label: "com.douki.multiCamSession", qos: .default)
     
     // Back camera pipeline
     private var backInput: AVCaptureDeviceInput?
@@ -127,8 +127,8 @@ class MultiCamManager: NSObject, ObservableObject {
         let deviceName = UIDevice.current.name.replacingOccurrences(of: " ", with: "_")
         let ts = Int(timestamp)
         
-        let backFileName = "cinecam_\(sessionID)_\(deviceName)_BACK_\(ts).mov"
-        let frontFileName = "cinecam_\(sessionID)_\(deviceName)_FRONT_\(ts).mov"
+        let backFileName = "douki_\(sessionID)_\(deviceName)_BACK_\(ts).mov"
+        let frontFileName = "douki_\(sessionID)_\(deviceName)_FRONT_\(ts).mov"
         
         let backURL = FileManager.default.temporaryDirectory.appendingPathComponent(backFileName)
         let frontURL = FileManager.default.temporaryDirectory.appendingPathComponent(frontFileName)

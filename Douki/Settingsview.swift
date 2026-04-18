@@ -1,6 +1,6 @@
 //
 //  SettingsView.swift
-//  Cinecam
+//  Douki
 //
 //  カメラ設定画面
 //
@@ -17,11 +17,11 @@ class PurchaseManager: ObservableObject {
     static let shared = PurchaseManager()
 
     @Published var isPremium: Bool {
-        didSet { UserDefaults.standard.set(isPremium, forKey: "cinecam.isPremium") }
+        didSet { UserDefaults.standard.set(isPremium, forKey: "douki.isPremium") }
     }
 
     init() {
-        isPremium = UserDefaults.standard.bool(forKey: "cinecam.isPremium")
+        isPremium = UserDefaults.standard.bool(forKey: "douki.isPremium")
     }
 }
 
@@ -38,7 +38,7 @@ struct SettingsView: View {
     @State private var selectedCodec: VideoCodec = .hevc
 
     /// UserDefaults に永続化するユーザー名
-    @AppStorage("cinecam.userName") private var userName: String = UIDevice.current.name
+    @AppStorage("douki.userName") private var userName: String = UIDevice.current.name
     /// 編集中の一時テキスト
     @State private var userNameDraft: String = ""
 

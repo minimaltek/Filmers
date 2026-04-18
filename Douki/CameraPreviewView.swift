@@ -1,6 +1,6 @@
 //
 //  CameraPreviewView.swift
-//  Cinecam
+//  Douki
 //
 //  Phase 2: カメラプレビュー表示
 //

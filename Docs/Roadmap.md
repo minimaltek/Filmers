@@ -1,4 +1,4 @@
-# Cinecam ロードマップ & 技術設計
+# Douki ロードマップ & 技術設計
 
 ## コンセプト
 > 「その場にいる全員のデバイスがカメラになる」→「世界中の友達と同時撮影できる」
@@ -17,7 +17,7 @@
 - IP Webcam（Android）の映像をiPhoneで表示
 
 ### 🔧 Phase 4b：タイムライン統合
-- CinecamタイムラインにRTSPストリームを追加
+- DoukiタイムラインにRTSPストリームを追加
 - RTPタイムスタンプ同期
 
 ### 🔧 Phase 4c：UX改善
@@ -68,7 +68,7 @@
     ↓ CVPixelBuffer
 [AVSampleBufferDisplayLayer]
     ↓
-[Cinecam タイムラインに統合]
+[Douki タイムラインに統合]
 ```
 
 ### IP Webcam 推奨設定（ユーザー向けガイド内に表示）
@@ -85,9 +85,9 @@ RTSP URL: rtsp://192.168.x.x:8080/h264_ulaw.sdp
 ### タイムスタンプ同期
 
 ```swift
-// RTPタイムスタンプをCinecamのマスタークロックに同期
+// RTPタイムスタンプをDoukiのマスタークロックに同期
 let rtpTimestamp: UInt32 = packet.timestamp
-let masterClock = CinecamSyncEngine.shared.masterTime
+let masterClock = DoukiSyncEngine.shared.masterTime
 let offset = masterClock - rtpTimestamp.toSeconds()
 ```
 
@@ -97,7 +97,7 @@ let offset = masterClock - rtpTimestamp.toSeconds()
 
 | デバイス | 接続方式 | 条件 |
 |---|---|---|
-| iPhone（Cinecamスレーブ） | MultipeerConnectivity | 同一ネットワーク不要 |
+| iPhone（Doukiスレーブ） | MultipeerConnectivity | 同一ネットワーク不要 |
 | Android（IP Webcam） | RTSP | 同一Wi-Fi必須 or ホットスポット |
 | 家庭用IPカメラ（Reolink等） | RTSP | 同一Wi-Fi必須 |
 | リモート参加（Phase 5） | WebRTC | インターネット接続 |
@@ -129,7 +129,7 @@ import StoreKit
 func checkProStatus() async -> Bool {
     for await result in Transaction.currentEntitlements {
         if case .verified(let transaction) = result {
-            if transaction.productID == "com.cinecam.pro" {
+            if transaction.productID == "com.douki.pro" {
                 return true
             }
         }
@@ -165,7 +165,7 @@ let maxDevices = ProManager.shared.isPro ? 999 : 2
   └ IP Webcamアプリ動作確認
 
 来週
-  └ CinecamにRTSP受信実装（Phase 4a）
+  └ DoukiにRTSP受信実装（Phase 4a）
   └ TestFlightビルド作成
 
 再来週

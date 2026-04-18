@@ -1,6 +1,6 @@
 //
-//  CinecamExportEngine.swift
-//  Cinecam
+//  DoukiExportEngine.swift
+//  Douki
 //
 //  ExclusiveEditTimeline の編集結果を AVComposition で1本の動画に書き出す
 
@@ -386,8 +386,8 @@ final class ExportEngine: ObservableObject {
 
         // ⑤ Export (1パス目: 回転・クロップ済み)
         let pass1URL = needsSecondPass
-            ? FileManager.default.temporaryDirectory.appendingPathComponent("cinecam_pass1_\(Int(Date().timeIntervalSince1970)).mp4")
-            : FileManager.default.temporaryDirectory.appendingPathComponent("cinecam_export_\(Int(Date().timeIntervalSince1970)).mp4")
+            ? FileManager.default.temporaryDirectory.appendingPathComponent("douki_pass1_\(Int(Date().timeIntervalSince1970)).mp4")
+            : FileManager.default.temporaryDirectory.appendingPathComponent("douki_export_\(Int(Date().timeIntervalSince1970)).mp4")
         try? FileManager.default.removeItem(at: pass1URL)
 
         guard let session = AVAssetExportSession(
@@ -446,7 +446,7 @@ final class ExportEngine: ObservableObject {
 
         // ⑥ 2パス目: 回転済み中間ファイルに CIFilter + 透かしを適用
         let finalURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cinecam_export_\(Int(Date().timeIntervalSince1970)).mp4")
+            .appendingPathComponent("douki_export_\(Int(Date().timeIntervalSince1970)).mp4")
         try? FileManager.default.removeItem(at: finalURL)
 
         let pass1Asset = AVURLAsset(url: pass1URL)
@@ -778,7 +778,7 @@ final class ExportEngine: ObservableObject {
     private static func loadWatermarkCIImage(renderSize: CGSize) -> CIImage? {
         // ロゴ画像読み込み（Asset Catalog → バンドル直接のフォールバック）
         let logo: UIImage? = UIImage(named: "WatermarkLogo")
-            ?? Bundle.main.url(forResource: "Cinecam_logo_white", withExtension: "png")
+            ?? Bundle.main.url(forResource: "Douki_logo_white", withExtension: "png")
                 .flatMap { try? Data(contentsOf: $0) }
                 .flatMap { UIImage(data: $0) }
         guard let logo, let cgImage = logo.cgImage else {

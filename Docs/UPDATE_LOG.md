@@ -1,4 +1,4 @@
-# Cinecam 更新ログ
+# Douki 更新ログ
 
 ---
 
@@ -50,14 +50,14 @@
 
 ### 透かし（ウォーターマーク）機能
 - **PurchaseManager**: UserDefaults ベースの課金状態管理シングルトン
-- **エクスポート時透かし**: CIImage 合成で「Cinecam」テキストを右下に描画（白、opacity 0.6、影付き）
+- **エクスポート時透かし**: CIImage 合成で「Douki」テキストを右下に描画（白、opacity 0.6、影付き）
 - **フィルタ+透かし対応**: CIFilter ハンドラー内で transform + フィルタ + 透かしを一括処理
 - **開発用トグル**: Settings 画面に `#if DEBUG` Premium Mode トグル追加
 
 ### 変更ファイル
 - `Previewview .swift` — タイムライン操作改善、レイアウト、透かし連携
 - `CameraSessionManager.swift` — MC 安定化（軽量リスタート、stale peer 処理、passive timeout）
-- `CinecamExportEngine.swift` — 透かし描画実装
+- `DoukiExportEngine.swift` — 透かし描画実装
 - `Settingsview.swift` — PurchaseManager、DEBUG トグル
 - `ContentView.swift` — レイアウト微調整
 
@@ -100,7 +100,7 @@
 - `CameraUtilities.swift` — マルチカメラ仮想デバイス除外
 - `ContentView.swift` — START CAMERA/AWAITING UI重複解消
 - `CameraOverlayControls.swift` — レンズセレクター修正、UI配置変更、解像度バッジ削除
-- `CinecamExclusiveEditTimeline.swift` — enforceExclusivity に priorityDevice 追加
+- `DoukiExclusiveEditTimeline.swift` — enforceExclusivity に priorityDevice 追加
 - `Previewview .swift` — ジェスチャー競合修正、再生ヘッド修正、トリムハンドル改善
 - `LibraryView.swift` — サムネイル、Select モード、UI整理
 - `CameraManager.swift` — orientation ヘルパー追加

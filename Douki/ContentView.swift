@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  Cinecam
+//  Douki
 //
 //  Multi-device synchronized camera app
 //
@@ -496,7 +496,7 @@ struct ContentView: View {
                 // ノードリスト
                 VStack(spacing: 1) {
                     // 自分
-                    let myName = UserDefaults.standard.string(forKey: "cinecam.userName")
+                    let myName = UserDefaults.standard.string(forKey: "douki.userName")
                         .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                         ?? UIDevice.current.name
                     let selfIsMaster = sessionManager.isMaster
@@ -925,7 +925,7 @@ struct ContentView: View {
                         .padding(.bottom, 10)
                         
                         VStack(spacing: 1) {
-                            let myName = UserDefaults.standard.string(forKey: "cinecam.userName")
+                            let myName = UserDefaults.standard.string(forKey: "douki.userName")
                                 .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                                 ?? UIDevice.current.name
                             let selfIsMaster = sessionManager.isMaster

@@ -1,6 +1,6 @@
 //
 //  FrameLayout.swift
-//  Cinecam
+//  Douki
 //
 //  フレームレイアウトの定義
 //

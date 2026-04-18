@@ -1,6 +1,6 @@
 //
 //  CameraSessionManager.swift
-//  Cinecam
+//  Douki
 //
 //  Phase 1: MultipeerConnectivity 接続機能
 //
@@ -12,7 +12,7 @@ import Combine
 class CameraSessionManager: NSObject, ObservableObject {
     // MARK: - Properties
     
-    private let serviceType = "cinecam-sync"
+    private let serviceType = "douki-sync"
     private var myPeerID: MCPeerID
     private let myDisplayName: String
     
@@ -43,7 +43,7 @@ class CameraSessionManager: NSObject, ObservableObject {
     //   専用のシリアルキューで保護する
     // value = CONNECTING 状態になった時刻（stale 判定用）
     private var _connectingPeerNames: [String: Date] = [:]
-    private let connectingLock = DispatchQueue(label: "cinecam.connectingLock")
+    private let connectingLock = DispatchQueue(label: "douki.connectingLock")
     
     /// CONNECTING のstale判定しきい値（Hang環境では10秒以上CONNECTINGが続くことがある）
     private let connectingStaleThreshold: TimeInterval = 15.0
@@ -217,7 +217,7 @@ class CameraSessionManager: NSObject, ObservableObject {
     
     override init() {
         // UserDefaults に保存されたユーザー名を使用。未設定ならデバイス名にフォールバック。
-        let savedName = UserDefaults.standard.string(forKey: "cinecam.userName")?.trimmingCharacters(in: .whitespaces)
+        let savedName = UserDefaults.standard.string(forKey: "douki.userName")?.trimmingCharacters(in: .whitespaces)
         let displayName = (savedName?.isEmpty == false) ? savedName! : UIDevice.current.name
         self.myDisplayName = displayName
         self.myPeerID = MCPeerID(displayName: displayName)

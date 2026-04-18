@@ -1,6 +1,6 @@
 //
 //  DesignConstants.swift
-//  Cinecam
+//  Douki
 //
 //  デザイン関連の定数定義
 //

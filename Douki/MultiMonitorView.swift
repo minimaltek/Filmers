@@ -1,6 +1,6 @@
 //
 //  MultiMonitorView.swift
-//  Cinecam
+//  Douki
 //
 //  マルチモニタービュー: 接続中の全デバイスのカメラスナップショットをタイル表示
 //

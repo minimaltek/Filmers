@@ -8,8 +8,8 @@
 	</array>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_cinecam-sync._tcp</string>
-		<string>_cinecam-sync._udp</string>
+		<string>_douki-sync._tcp</string>
+		<string>_douki-sync._udp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>複数デバイスで同期撮影するためにカメラを使用します。</string>

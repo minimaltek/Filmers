@@ -1,6 +1,6 @@
 //
 //  CameraManager.swift
-//  Cinecam
+//  Douki
 //
 //  Phase 2: カメラ録画機能
 //
@@ -9,7 +9,7 @@ import Foundation
 import AVFoundation
 import UIKit
 import CoreImage
-// Photos framework は不要（カメラロールへの保存は CinecamExportEngine で行う）
+// Photos framework は不要（カメラロールへの保存は DoukiExportEngine で行う）
 import Combine
 
 class CameraManager: NSObject, ObservableObject {
@@ -65,11 +65,11 @@ class CameraManager: NSObject, ObservableObject {
     
     // 録画設定（UserDefaults で永続化）
     @Published var desiredOrientation: VideoOrientation = .cinema {
-        didSet { UserDefaults.standard.set(desiredOrientation.rawValue, forKey: "cinecam.desiredOrientation") }
+        didSet { UserDefaults.standard.set(desiredOrientation.rawValue, forKey: "douki.desiredOrientation") }
     }
     var videoOrientation: AVCaptureVideoOrientation = .landscapeRight  // デフォルト: 横向き
     @Published var videoCodec: AVVideoCodecType = .hevc {
-        didSet { UserDefaults.standard.set(VideoCodec.from(avCodec: videoCodec).rawValue, forKey: "cinecam.videoCodec") }
+        didSet { UserDefaults.standard.set(VideoCodec.from(avCodec: videoCodec).rawValue, forKey: "douki.videoCodec") }
     }
     
     private var captureSession: AVCaptureSession?
@@ -87,7 +87,7 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: - Snapshot (Multi-Monitor)
     private var snapshotOutput: AVCaptureVideoDataOutput?
-    private let snapshotQueue = DispatchQueue(label: "com.cinecam.snapshot", qos: .utility)
+    private let snapshotQueue = DispatchQueue(label: "com.douki.snapshot", qos: .utility)
     /// CIContext はコストが高いので使い回す
     private lazy var snapshotCIContext = CIContext(options: [.useSoftwareRenderer: false])
     /// 最新スナップショット（JPEG Data） — メインスレッドから読み書きする
@@ -102,7 +102,7 @@ class CameraManager: NSObject, ObservableObject {
     // AVCaptureSession 専用の直列キュー。
     // global(qos:) を使うと MCSession の内部処理と同じスレッドプールを奪い合い、
     // startRunning() の長時間ブロックが MCSession のタイムアウト切断を引き起こす。
-    private let sessionQueue = DispatchQueue(label: "com.cinecam.captureSession", qos: .default)
+    private let sessionQueue = DispatchQueue(label: "com.douki.captureSession", qos: .default)
     
     // 録画開始時のタイムスタンプ（同期用）
     private var syncTimestamp: TimeInterval = 0
@@ -170,12 +170,12 @@ class CameraManager: NSObject, ObservableObject {
     override init() {
         super.init()
         // UserDefaults から保存済み設定を復元
-        if let orientationRaw = UserDefaults.standard.string(forKey: "cinecam.desiredOrientation"),
+        if let orientationRaw = UserDefaults.standard.string(forKey: "douki.desiredOrientation"),
            let orientation = VideoOrientation(rawValue: orientationRaw) {
             desiredOrientation = orientation
             videoOrientation = orientation.avOrientation
         }
-        if let codecRaw = UserDefaults.standard.string(forKey: "cinecam.videoCodec"),
+        if let codecRaw = UserDefaults.standard.string(forKey: "douki.videoCodec"),
            let codec = VideoCodec(rawValue: codecRaw) {
             videoCodec = codec.avCodec
         }
@@ -811,7 +811,7 @@ class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        let fileName = "cinecam_\(sessionID)_\(UIDevice.current.name.replacingOccurrences(of: " ", with: "_"))_\(Int(timestamp)).mov"
+        let fileName = "douki_\(sessionID)_\(UIDevice.current.name.replacingOccurrences(of: " ", with: "_"))_\(Int(timestamp)).mov"
         let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: fileURL)
         currentVideoURL = fileURL

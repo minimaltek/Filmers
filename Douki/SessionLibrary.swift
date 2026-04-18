@@ -1,6 +1,6 @@
 //
 //  SessionLibrary.swift
-//  Cinecam
+//  Douki
 //
 //  撮影済みセッションの履歴管理（UserDefaults に永続化）
 //
@@ -166,7 +166,7 @@ final class SessionLibrary: ObservableObject {
 
     @Published private(set) var records: [SessionRecord] = []
 
-    private let key = "cinecam.sessionLibrary"
+    private let key = "douki.sessionLibrary"
 
     private init() { load() }
 

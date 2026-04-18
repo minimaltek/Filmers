@@ -1,6 +1,6 @@
 //
 //  PreviewView.swift
-//  Cinecam
+//  Douki
 //
 
 import SwiftUI

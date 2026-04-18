@@ -1,6 +1,6 @@
 //
 //  CameraUtilities.swift
-//  Cinecam
+//  Douki
 //
 //  共通のユーティリティ関数と定数
 //

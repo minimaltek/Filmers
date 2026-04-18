@@ -1,6 +1,6 @@
 //
-//  CinecamApp.swift
-//  Cinecam
+//  DoukiApp.swift
+//  Douki
 //
 //  Created by minimaltek on 2026/02/16.
 //
@@ -69,7 +69,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 }
 
 @main
-struct CinecamApp: App {
+struct DoukiApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
