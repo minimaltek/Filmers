@@ -1,4 +1,4 @@
-# CineCam
+# Filmers
 
 ## 🎬 Turn multiple iPhones into a pocket-sized multi-camera film system.
 
