@@ -1,3 +1,4 @@
+
 # Filmers
 
 ## 🎬 Turn multiple iPhones into a pocket-sized multi-camera film system.
@@ -30,12 +31,13 @@ and export it as one cinematic video.
 ## Screenshots
 
 <p align="center">
-  <img width="300" src="https://github.com/user-attachments/assets/58c11e10-be43-4337-a6e5-66f16414e2d3" />
+  <img width="300" src="https://github.com/user-attachments/assets/943dcc25-7a4d-49d0-9c33-a1d43fb0f66b" />
   &nbsp;&nbsp;&nbsp;
-  <img width="300" src="https://github.com/user-attachments/assets/606fdf25-2d0a-4741-b14c-f43a781b3fb6" />
+  <img width="300" src="https://github.com/user-attachments/assets/f8cf3cf2-e2a9-4f60-951c-c8b60832df3d" />
   &nbsp;&nbsp;&nbsp;
-  <img width="300" src="https://github.com/user-attachments/assets/ece2e494-0cf8-4421-99b4-d6dec952a40f" />
-</p>
+  <img width="300" src="https://github.com/user-attachments/assets/07edb3eb-d037-4eed-ab22-2e3835393d99" />
+    &nbsp;&nbsp;&nbsp;
+  <img width="300" src="https://github.com/user-attachments/assets/1db729c5-651b-4078-b548-563148267763" />
 
 ---
 
