@@ -364,19 +364,19 @@ struct CameraOverlayControls: View {
     
     private var centerRecordingTimer: some View {
         VStack {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Circle()
                     .fill(Color.red)
-                    .frame(width: 8, height: 8)
+                    .frame(width: 5, height: 5)
                 
                 Text(TimeFormatter.formatDuration(cameraManager.recordingDuration))
-                    .font(.system(size: 28, weight: .thin, design: .monospaced))
+                    .font(.system(size: 14, weight: .thin, design: .monospaced))
                     .foregroundColor(.white)
             }
-            .padding(.horizontal, 30)
-            .padding(.vertical, 15)
+            .padding(.horizontal, 15)
+            .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: 15)
+                RoundedRectangle(cornerRadius: 8)
                     .fill(Color.black.opacity(0.5))
             )
         }

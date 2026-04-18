@@ -293,9 +293,10 @@ class CameraSessionManager: NSObject, ObservableObject {
     /// 接続直後にマスターであれば宣言を送る
     private func announceMasterRoleIfNeeded(to peer: MCPeerID) {
         guard isMaster, masterPeerID == myPeerID else { return }
-        
-        // チャンネル確立を待つため遅延（MCSession 内部ストリームの安定化に 2 秒必要）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+
+        // チャンネル確立を待つため遅延（MCSession 内部ストリームの安定化に 3 秒必要）
+        // 2秒では「Not in connected state」エラーが出ることがある
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self, self.connectedPeers.contains(where: { $0.displayName == peer.displayName }) else { return }
             self.sendMasterAnnouncement(to: peer)
             self.addLog("Master announcement sent to \(peer.displayName)")
@@ -402,32 +403,47 @@ class CameraSessionManager: NSObject, ObservableObject {
         
         if connectedPeers.isEmpty && !isActive {
             sessionID = ""
-            
+
             isWaitingForCameraReady = false
             cameraReadyPeers.removeAll()
-            
+
             let cameraIsRunning = isCameraReady
                 || (cameraManager?.isCameraSessionRunning == true)
-            if cameraIsRunning {
-                isCameraReady = false
-                OrientationLock.isCameraActive = false
-                cameraManager?.stopSession()
-                enableIdleTimer()
-                addLog("Camera stopped – all peers disconnected")
-            }
-            
-            if isMultiMonitorActive {
-                isMultiMonitorActive = false
-                snapshotTimer?.invalidate()
-                snapshotTimer = nil
-                peerSnapshots.removeAll()
-                cameraManager?.isSnapshotEnabled = false
-            }
-            
+
             if persistentRole {
+                // ★ 永続モード: カメラは停止せず維持（再起動のオーバーヘッドを避ける）
+                // マルチモニターのみ停止
+                if isMultiMonitorActive {
+                    isMultiMonitorActive = false
+                    snapshotTimer?.invalidate()
+                    snapshotTimer = nil
+                    peerSnapshots.removeAll()
+                    cameraManager?.isSnapshotEnabled = false
+                }
                 connectionState = .connecting
-                addLog("Persistent mode – will retry (master=\(persistentMasterName ?? "nil"))")
+                if cameraIsRunning {
+                    addLog("Persistent mode – camera kept running, will retry (master=\(persistentMasterName ?? "nil"))")
+                } else {
+                    addLog("Persistent mode – will retry (master=\(persistentMasterName ?? "nil"))")
+                }
             } else {
+                // 非永続モード: カメラを停止
+                if cameraIsRunning {
+                    isCameraReady = false
+                    OrientationLock.isCameraActive = false
+                    cameraManager?.stopSession()
+                    enableIdleTimer()
+                    addLog("Camera stopped – all peers disconnected")
+                }
+
+                if isMultiMonitorActive {
+                    isMultiMonitorActive = false
+                    snapshotTimer?.invalidate()
+                    snapshotTimer = nil
+                    peerSnapshots.removeAll()
+                    cameraManager?.isSnapshotEnabled = false
+                }
+
                 connectionState = .disconnected
                 if !isMaster && masterPeerID != nil {
                     masterPeerID = nil
@@ -498,10 +514,11 @@ class CameraSessionManager: NSObject, ObservableObject {
         
         // ★ 1-2回目: MCSession の内部ソケットクリーンアップを待ってから再招待
         // 即座に invitePeer すると前回の接続のクリーンアップと衝突して Connection refused になる
+        // 3.0秒待つことで「Not in connected state」エラーを回避
         invitedPeerNames.remove(peerName)
         removeConnectingPeer(peerName)
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self else { return }
             guard !self.connectedPeers.contains(where: { $0.displayName == peerName }) else { return }
             
@@ -693,8 +710,9 @@ class CameraSessionManager: NSObject, ObservableObject {
             self.addLog("REBUILD: session rebuilt (new PeerID) – searching...")
         }
         rebuildWorkItem = workItem
-        // ★ MCSession disconnect 後のソケットクリーンアップ待ち（安全弁）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+        // ★ MCSession disconnect 後のソケットクリーンアップ待ち（2.5秒必要）
+        // 1.0秒では「Not in connected state, so giving up for participant」エラーが出る
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: workItem)
     }
 
     /// 切断後にDiscoveryを再開始（役割選択画面に戻る時に使用）
@@ -974,7 +992,8 @@ class CameraSessionManager: NSObject, ObservableObject {
         cameraManager?.setupCamera()
         
         // MCSessionチャンネルが確実に確立するまで待ってからコマンドを送信
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+        // 3.0秒では「Not in connected state」エラーが出るため4.0秒に延長
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
             guard let self else { return }
             
             // 既に切断済みならカメラ起動フローを中止
@@ -1525,19 +1544,31 @@ class CameraSessionManager: NSObject, ObservableObject {
     
     /// カメラ起動処理（スレーブ用）
     private func handleStartCamera(fromPeer peer: MCPeerID) {
-        addLog("Starting camera for slave...")
-        
         // カメラ起動 → 撮影画面は傾きに追従（回転許可）
         OrientationLock.isCameraActive = true
-        
+
+        // ★ 既にカメラが起動中なら再セットアップをスキップ（再接続時のオーバーヘッド削減）
+        if cameraManager?.isCameraSessionRunning == true {
+            addLog("Camera already running – sending camera_ready immediately")
+            isCameraReady = true
+            let command: [String: Any] = [
+                "action": "camera_ready",
+                "peerName": myPeerID.displayName
+            ]
+            sendCommandTo(peer, command: command)
+            return
+        }
+
+        addLog("Starting camera for slave...")
+
         // カメラをセットアップして、完了後にcamera_readyを送信
         cameraManager?.setupCamera()
-        
+
         // カメラが完全に起動するまで少し待つ
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self else { return }
             self.isCameraReady = true
-            
+
             // マスターにcamera_ready通知を送信
             let command: [String: Any] = [
                 "action": "camera_ready",
@@ -1601,78 +1632,75 @@ class CameraSessionManager: NSObject, ObservableObject {
         // ✅ Stop camera when recording ends (transfer continues in background)
         cameraManager?.stopSession()
         addLog("Camera stopped – recording completed, starting transfer")
-        
+
         #if DEBUG
         if let fileSize = try? FileManager.default.attributesOfItem(atPath: videoURL.path)[.size] as? UInt64 {
             print("📹 [SessionManager] File size: \(fileSize) bytes")
         }
         #endif
-        
+
         #if DEBUG
         for peer in connectedPeers {
             print("📹 [SessionManager]   - Peer: \(peer.displayName)")
         }
         #endif
-        
+
         addLog("Recording completed: \(videoURL.lastPathComponent)")
-        
-        // Copy own video to Documents (persist)
+
+        // Copy own video to Documents (persist) — バックグラウンドでファイルI/O
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let fileName = "\(sessionID)_\(myPeerID.displayName).mov"
         let destinationURL = documentsPath.appendingPathComponent(fileName)
-        
+        let myDeviceName = myPeerID.displayName
+
         #if DEBUG
         print("📹 [SessionManager] Copying to: \(destinationURL.path)")
         #endif
-        
-        do {
-            // Remove existing file if exists
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    try FileManager.default.removeItem(at: destinationURL)
+                    #if DEBUG
+                    print("📹 [SessionManager] Removed existing file")
+                    #endif
+                }
+                try FileManager.default.copyItem(at: videoURL, to: destinationURL)
                 #if DEBUG
-                print("📹 [SessionManager] Removed existing file")
+                print("✅ [SessionManager] Copied successfully")
                 #endif
-            }
-            
-            // Copy file
-            try FileManager.default.copyItem(at: videoURL, to: destinationURL)
-            #if DEBUG
-            print("✅ [SessionManager] Copied successfully")
-            #endif
-            
-            // Record own video (save destination URL)
-            let myDeviceName = myPeerID.displayName
-            if recordedVideos[sessionID] == nil {
-                recordedVideos[sessionID] = [:]
+            } catch {
+                await MainActor.run {
+                    self?.addLog("Copy error: \(error.localizedDescription)")
+                }
                 #if DEBUG
-                print("📹 [SessionManager] Created new session entry")
+                print("❌ [SessionManager] Copy error: \(error.localizedDescription)")
+                print("❌ [SessionManager] Error details: \(error)")
                 #endif
+                return
             }
-            recordedVideos[sessionID]?[myDeviceName] = destinationURL
-            
-            #if DEBUG
-            print("📹 [SessionManager] Stored own video for \(myDeviceName)")
-            print("📹 [SessionManager] Current video count for session: \(recordedVideos[sessionID]?.count ?? 0)")
-            #endif
-            
-            // Send video to other devices (from original URL)
-            #if DEBUG
-            print("📹 [SessionManager] Starting video transfer to peers...")
-            #endif
-            sendVideoToAllPeers(videoURL: videoURL, sessionID: sessionID)
-            
-            // Check if all videos received
-            checkAllVideosReceived(sessionID: sessionID)
-            
-        } catch {
-            let errorMsg = "Copy error: \(error.localizedDescription)"
-            addLog(errorMsg)
-            #if DEBUG
-            print("❌ [SessionManager] \(errorMsg)")
-            print("❌ [SessionManager] Error details: \(error)")
-            #endif
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if self.recordedVideos[sessionID] == nil {
+                    self.recordedVideos[sessionID] = [:]
+                    #if DEBUG
+                    print("📹 [SessionManager] Created new session entry")
+                    #endif
+                }
+                self.recordedVideos[sessionID]?[myDeviceName] = destinationURL
+
+                #if DEBUG
+                print("📹 [SessionManager] Stored own video for \(myDeviceName)")
+                print("📹 [SessionManager] Current video count for session: \(self.recordedVideos[sessionID]?.count ?? 0)")
+                print("📹 [SessionManager] Starting video transfer to peers...")
+                #endif
+
+                self.sendVideoToAllPeers(videoURL: videoURL, sessionID: sessionID)
+                self.checkAllVideosReceived(sessionID: sessionID)
+            }
         }
-        
+
         #if DEBUG
         print("📹 [SessionManager] =======================================================")
         #endif
@@ -1928,8 +1956,9 @@ extension CameraSessionManager: MCSessionDelegate {
                 }
                 
                 // ★ 永続モード: マスターが既にカメラ起動済みなら、再接続したスレーブに start_camera を送る
+                // 3.0秒待ってMCSessionチャンネルが安定してから送信
                 if self.persistentRole && self.isMaster && self.isCameraReady {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
                         guard let self,
                               self.connectedPeers.contains(where: { $0.displayName == peerName }) else { return }
                         self.sendCameraStartCommand(to: peerID)

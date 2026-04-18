@@ -791,41 +791,40 @@ struct ContentView: View {
     
     private func handleSingleModeRecordingCompleted(backURL: URL, frontURL: URL, sessionID: String) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        
         let backDest = docs.appendingPathComponent("\(sessionID)_BACK.mov")
         let frontDest = docs.appendingPathComponent("\(sessionID)_FRONT.mov")
-        
-        do {
-            if FileManager.default.fileExists(atPath: backDest.path) {
-                try FileManager.default.removeItem(at: backDest)
+        let orientation = cameraManager.desiredOrientation
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                if FileManager.default.fileExists(atPath: backDest.path) {
+                    try FileManager.default.removeItem(at: backDest)
+                }
+                try FileManager.default.copyItem(at: backURL, to: backDest)
+
+                if FileManager.default.fileExists(atPath: frontDest.path) {
+                    try FileManager.default.removeItem(at: frontDest)
+                }
+                try FileManager.default.copyItem(at: frontURL, to: frontDest)
+            } catch {
+                #if DEBUG
+                print("❌ [SingleMode] File copy error: \(error)")
+                #endif
+                return
             }
-            try FileManager.default.copyItem(at: backURL, to: backDest)
-            
-            if FileManager.default.fileExists(atPath: frontDest.path) {
-                try FileManager.default.removeItem(at: frontDest)
+
+            let videos: [String: URL] = [
+                "BACK": backDest,
+                "FRONT": frontDest
+            ]
+
+            await MainActor.run {
+                sessionManager.previewSessionID = sessionID
+                sessionManager.previewVideos = videos
+                library.add(sessionID: sessionID, videos: videos, orientation: orientation)
+                sessionManager.showPreview = true
             }
-            try FileManager.default.copyItem(at: frontURL, to: frontDest)
-        } catch {
-            #if DEBUG
-            print("❌ [SingleMode] File copy error: \(error)")
-            #endif
-            return
         }
-        
-        let videos: [String: URL] = [
-            "BACK": backDest,
-            "FRONT": frontDest
-        ]
-        
-        // 既存のプレビューパイプラインに接続
-        sessionManager.previewSessionID = sessionID
-        sessionManager.previewVideos = videos
-        
-        // ライブラリに追加
-        library.add(sessionID: sessionID, videos: videos, orientation: cameraManager.desiredOrientation)
-        
-        // プレビュー表示
-        sessionManager.showPreview = true
     }
     
     // MARK: - Main Screen

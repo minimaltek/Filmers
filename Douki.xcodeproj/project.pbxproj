@@ -22,12 +22,12 @@
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = E28EADA82F42E8E1007131DF /* Cinecam */;
+			target = E28EADA82F42E8E1007131DF /* Douki */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		E28EADAB2F42E8E1007131DF /* Cinecam */ = {
+		E28EADAB2F42E8E1007131DF /* Douki */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				E28EADC42F42FB6A007131DF /* Exceptions for "Douki" folder in "Douki" target */,
@@ -58,7 +58,7 @@
 			isa = PBXGroup;
 			children = (
 				E28EADC02F42F7CD007131DF /* Docs */,
-				E28EADAB2F42E8E1007131DF /* Cinecam */,
+				E28EADAB2F42E8E1007131DF /* Douki */,
 				E28EADAA2F42E8E1007131DF /* Products */,
 				E2D982ED2F60CC74007F02CE /* MetalPreviewRenderer.swift */,
 			);
@@ -75,7 +75,7 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		E28EADA82F42E8E1007131DF /* Cinecam */ = {
+		E28EADA82F42E8E1007131DF /* Douki */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = E28EADB42F42E8E3007131DF /* Build configuration list for PBXNativeTarget "Douki" */;
 			buildPhases = (
@@ -88,7 +88,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				E28EADAB2F42E8E1007131DF /* Cinecam */,
+				E28EADAB2F42E8E1007131DF /* Douki */,
 				E28EADC02F42F7CD007131DF /* Docs */,
 			);
 			name = Douki;
@@ -131,7 +131,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				E28EADA82F42E8E1007131DF /* Cinecam */,
+				E28EADA82F42E8E1007131DF /* Douki */,
 			);
 		};
 /* End PBXProject section */
@@ -289,7 +289,7 @@
 				DEVELOPMENT_TEAM = 4YRYH5BD9B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Cinecam/Info.plist;
+				INFOPLIST_FILE = Douki/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "動画を撮影するためにカメラを使用します";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "他のデバイスと同期するためにローカルネットワークを使用します";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声を録音するためにマイクを使用します";
@@ -306,7 +306,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.42;
-				PRODUCT_BUNDLE_IDENTIFIER = com.cycle2012.Cinecam;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cycle2012.Douki;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -328,7 +328,7 @@
 				DEVELOPMENT_TEAM = 4YRYH5BD9B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Cinecam/Info.plist;
+				INFOPLIST_FILE = Douki/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "動画を撮影するためにカメラを使用します";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "他のデバイスと同期するためにローカルネットワークを使用します";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声を録音するためにマイクを使用します";
@@ -345,7 +345,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.42;
-				PRODUCT_BUNDLE_IDENTIFIER = com.cycle2012.Cinecam;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cycle2012.Douki;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
