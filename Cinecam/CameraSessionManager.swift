@@ -238,6 +238,11 @@ class CameraSessionManager: NSObject, ObservableObject {
         }
     }
     
+    deinit {
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
+    }
+
     // MARK: - Public Methods
     
     /// 自動Discovery開始（アプリ起動時に自動実行）
@@ -1008,7 +1013,6 @@ class CameraSessionManager: NSObject, ObservableObject {
                 self.addLog("Camera ready timeout – some peers did not respond")
                 // タイムアウトしても続行（応答したピアとだけ録画）
                 self.isCameraReady = true
-            self.disableIdleTimer()
                 self.disableIdleTimer()
             }
         }
@@ -1126,7 +1130,7 @@ class CameraSessionManager: NSObject, ObservableObject {
     private func sendCameraStartCommand(to peer: MCPeerID) {
         let command: [String: Any] = [
             "action": "start_camera",
-            "orientation": cameraManager?.desiredOrientation.rawValue ?? "横向き"
+            "orientation": cameraManager?.desiredOrientation.rawValue ?? VideoOrientation.cinema.rawValue
         ]
         
         guard let data = try? JSONSerialization.data(withJSONObject: command) else {
@@ -1704,9 +1708,9 @@ class CameraSessionManager: NSObject, ObservableObject {
             let minutes = Int(totalRemaining) / 60
             let seconds = Int(totalRemaining) % 60
             if minutes > 0 {
-                transferETAString = "残り約 \(minutes)分\(seconds)秒"
+                transferETAString = "About \(minutes)m \(seconds)s left"
             } else {
-                transferETAString = "残り約 \(seconds)秒"
+                transferETAString = "About \(seconds)s left"
             }
         }
     }

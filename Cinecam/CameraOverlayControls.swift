@@ -284,8 +284,8 @@ struct CameraOverlayControls: View {
                             cameraManager.setExposureBias(exposureDragStartBias + delta)
                         }
                     }
-                    .onEnded { _ in
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    .onEnded { value in
+                        if isDraggingExposure {
                             isDraggingExposure = false
                         }
                     }
@@ -395,10 +395,10 @@ struct CameraOverlayControls: View {
                         .foregroundColor(.yellow)
                     
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(peerName)の接続が切れました")
+                        Text("\(peerName) DISCONNECTED")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.white)
-                        Text("録画を停止しますか？")
+                        Text("Stop recording?")
                             .font(.system(size: 13))
                             .foregroundColor(.white.opacity(0.8))
                     }
@@ -460,10 +460,10 @@ struct CameraOverlayControls: View {
                         .foregroundColor(.red)
                     
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("マスターとの接続が切れました")
+                        Text("MASTER DISCONNECTED")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.white)
-                        Text("録画を停止してください")
+                        Text("Please stop recording")
                             .font(.system(size: 13))
                             .foregroundColor(.white.opacity(0.8))
                     }

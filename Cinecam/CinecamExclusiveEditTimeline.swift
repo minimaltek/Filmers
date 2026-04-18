@@ -9,11 +9,14 @@ struct SegmentFilterSettings: Equatable {
     var kaleidoscopeCenterX: Float = 0.5
     var kaleidoscopeCenterY: Float = 0.5
     var tileHeight: Float = 200       // TILE用の縦幅（kaleidoscopeSize が横幅）
-    var mirrorDirection: Int = 0      // MIRROR用: 0=左を反転, 1=右を反転
+    var mirrorDirection: Int = 0      // MIRROR用: 0=Vertical-L, 1=Vertical-R, 2=Horizon-T, 3=Horizon-B
     var rotationAngle: Float = 0     // 回転角度（ラジアン）
     var autoRotateSpeed: Float = 0   // AUTO回転速度（rad/sec, 0 = OFF）
     var speedRate: Float = 1.0
-    var isDefault: Bool { videoFilter == nil && kaleidoscopeType == nil && speedRate == 1.0 }
+    var filterIntensity: Float = 1.0 // フィルタ強度（0.0〜1.0, 1.0 = 100%適用）
+    var pitchCents: Float = 0        // ピッチシフト（セント単位: 0 = グローバル設定に従う）
+    var noSound: Bool = false        // 無音フラグ（true = このセグメントを無音で書き出す）
+    var isDefault: Bool { videoFilter == nil && kaleidoscopeType == nil && speedRate == 1.0 && pitchCents == 0 && !noSound }
 }
 
 struct ClipSegment: Identifiable, Equatable {
@@ -109,8 +112,10 @@ final class ExclusiveEditTimeline: ObservableObject {
               let idx = segs.firstIndex(where: { $0.id == segmentID }),
               let range = videoRangeByDevice[device] else { return }
         segs[idx].trimIn = max(segs[idx].videoStart, min(segs[idx].trimOut - 0.1, newTrimIn))
-        segmentsByDevice[device] = mergeAdjacentSegments(segs, range: range)
-        enforceExclusivity(priorityDevice: device)
+        let merged = mergeAdjacentSegments(segs, range: range)
+        var snapshot = segmentsByDevice
+        snapshot[device] = merged
+        segmentsByDevice = enforceExclusivitySnapshot(snapshot, priorityDevice: device)
     }
 
     func moveTrimOut(segmentID: UUID, device: String, newTrimOut: Double) {
@@ -118,8 +123,10 @@ final class ExclusiveEditTimeline: ObservableObject {
               let idx = segs.firstIndex(where: { $0.id == segmentID }),
               let range = videoRangeByDevice[device] else { return }
         segs[idx].trimOut = min(segs[idx].videoEnd, max(segs[idx].trimIn + 0.1, newTrimOut))
-        segmentsByDevice[device] = mergeAdjacentSegments(segs, range: range)
-        enforceExclusivity(priorityDevice: device)
+        let merged = mergeAdjacentSegments(segs, range: range)
+        var snapshot = segmentsByDevice
+        snapshot[device] = merged
+        segmentsByDevice = enforceExclusivitySnapshot(snapshot, priorityDevice: device)
     }
 
     func moveSegment(segmentID: UUID, device: String, deltaSeconds: Double) {
@@ -166,10 +173,11 @@ final class ExclusiveEditTimeline: ObservableObject {
 
         // 追加後に隣接セグメントをマージして連続した青枠をまとめる
         let merged = mergeAdjacentSegments(existing + [newSeg], range: range)
-        segmentsByDevice[device] = merged
-
-        // 全デバイス間で排他制約を強制適用（操作中デバイスを最優先）
-        enforceExclusivity(priorityDevice: device)
+        // スナップショットに書き込み → enforceExclusivity 相当の処理を1回の @Published 書き込みで完了
+        // （segmentsByDevice への複数回書き込みによる二重再レンダリングを防止）
+        var snapshot = segmentsByDevice
+        snapshot[device] = merged
+        segmentsByDevice = enforceExclusivitySnapshot(snapshot, priorityDevice: device)
     }
 
     /// trimIn/trimOut が接触・重複しているセグメントを1つに結合する。
@@ -273,6 +281,38 @@ final class ExclusiveEditTimeline: ObservableObject {
             result[device] = remaining
         }
         segmentsByDevice = result
+    }
+
+    /// 排他制約をスナップショットに適用して返す（@Published を発火させない純粋関数版）
+    /// addSegment 内で segmentsByDevice への書き込みを1回にまとめるために使用
+    private func enforceExclusivitySnapshot(
+        _ input: [String: [ClipSegment]],
+        priorityDevice: String? = nil
+    ) -> [String: [ClipSegment]] {
+        let locked = devices.filter { lockedDevices.contains($0) }
+        let unlocked = devices.filter { !lockedDevices.contains($0) }
+        let ordered: [String]
+        if let priority = priorityDevice, unlocked.contains(priority) {
+            ordered = locked + [priority] + unlocked.filter { $0 != priority }
+        } else {
+            ordered = locked + unlocked
+        }
+        var committed: [(trimIn: Double, trimOut: Double)] = []
+        var result: [String: [ClipSegment]] = [:]
+        for device in ordered {
+            let segs = (input[device] ?? []).filter { $0.isValid }
+            var remaining = segs
+            for used in committed {
+                remaining = remaining.flatMap {
+                    subtract(from: $0, excludeStart: used.trimIn, excludeEnd: used.trimOut)
+                }.filter { $0.isValid }
+            }
+            for seg in remaining {
+                committed.append((seg.trimIn, seg.trimOut))
+            }
+            result[device] = remaining
+        }
+        return result
     }
 
     /// セグメントを削除する（ダブルタップで呼ばれる）

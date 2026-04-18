@@ -122,7 +122,7 @@ struct SettingsView: View {
                     } footer: {
                         Text(purchaseManager.isPremium
                              ? "Export without watermark"
-                             : "Export with Cinecam watermark")
+                             : "Export with Douki watermark")
                             .font(.caption)
                     }
                     #endif

@@ -31,6 +31,9 @@ struct SavedSegmentFilterSettings: Codable, Equatable {
     var rotationAngle: Float?
     var autoRotateSpeed: Float?
     var speedRate: Float?
+    var filterIntensity: Float?
+    var pitchCents: Float?
+    var noSound: Bool?
 
     init(from settings: SegmentFilterSettings) {
         self.videoFilter = settings.videoFilter
@@ -43,6 +46,9 @@ struct SavedSegmentFilterSettings: Codable, Equatable {
         self.rotationAngle = settings.rotationAngle
         self.autoRotateSpeed = settings.autoRotateSpeed
         self.speedRate = settings.speedRate
+        self.filterIntensity = settings.filterIntensity
+        self.pitchCents = settings.pitchCents != 0 ? settings.pitchCents : nil
+        self.noSound = settings.noSound ? true : nil
     }
 
     func toSegmentFilterSettings() -> SegmentFilterSettings {
@@ -56,7 +62,10 @@ struct SavedSegmentFilterSettings: Codable, Equatable {
             mirrorDirection: mirrorDirection ?? 0,
             rotationAngle: rotationAngle ?? 0,
             autoRotateSpeed: autoRotateSpeed ?? 0,
-            speedRate: speedRate ?? 1.0
+            speedRate: speedRate ?? 1.0,
+            filterIntensity: filterIntensity ?? 1.0,
+            pitchCents: pitchCents ?? 0,
+            noSound: noSound ?? false
         )
     }
 }
@@ -92,6 +101,8 @@ struct SessionRecord: Identifiable, Codable, Equatable {
     var tileHeight: Float?
     /// 再生スピード倍率（1.0 = 通常）
     var playbackSpeed: Float?
+    /// フィルタ強度（0.0〜1.0, nil = 1.0）
+    var filterIntensity: Float?
 
     /// URL に復元した辞書
     /// パスはサンドボックス相対（ファイル名のみ）で保存し、
@@ -191,6 +202,7 @@ final class SessionLibrary: ObservableObject {
         kaleidoscopeCenterY: Float = 0.5,
         tileHeight: Float = 200,
         playbackSpeed: Float = 1.0,
+        filterIntensity: Float = 1.0,
         segmentFilterSettings: [UUID: SegmentFilterSettings] = [:]
     ) {
         guard let idx = records.firstIndex(where: { $0.id == id }) else {
@@ -224,6 +236,7 @@ final class SessionLibrary: ObservableObject {
         records[idx].kaleidoscopeCenterY = kaleidoscopeCenterY != 0.5 ? kaleidoscopeCenterY : nil
         records[idx].tileHeight = tileHeight != 200 ? tileHeight : nil
         records[idx].playbackSpeed = playbackSpeed != 1.0 ? playbackSpeed : nil
+        records[idx].filterIntensity = filterIntensity != 1.0 ? filterIntensity : nil
         save()
         #if DEBUG
         print("✅ [Library] Saved edit state for id=\(id), devices=\(newState.keys.sorted()), locked=\(lockedDevices.sorted())")

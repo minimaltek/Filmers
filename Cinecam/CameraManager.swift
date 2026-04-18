@@ -881,7 +881,11 @@ class CameraManager: NSObject, ObservableObject {
         timer?.invalidate()
         timer = nil
     }
-    
+
+    deinit {
+        stopTimer()
+    }
+
     /// カメラセッション停止
     func stopSession() {
         // Preview 環境では何もしない（UIのクリーンアップのみ）

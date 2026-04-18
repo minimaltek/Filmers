@@ -159,8 +159,8 @@ struct ContentView: View {
                 onRename: { newTitle in
                     library.rename(id: sessionManager.previewSessionID, title: newTitle)
                 },
-                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter, pitchCents, kaleidoscope, kSize, kCX, kCY, tH, speed, segFilterSettings in
-                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter, pitchCents: pitchCents, kaleidoscope: kaleidoscope, kaleidoscopeSize: kSize, kaleidoscopeCenterX: kCX, kaleidoscopeCenterY: kCY, tileHeight: tH, playbackSpeed: speed, segmentFilterSettings: segFilterSettings)
+                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter, pitchCents, kaleidoscope, kSize, kCX, kCY, tH, speed, fIntensity, segFilterSettings in
+                    library.saveEditState(id: sessionManager.previewSessionID, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter, pitchCents: pitchCents, kaleidoscope: kaleidoscope, kaleidoscopeSize: kSize, kaleidoscopeCenterX: kCX, kaleidoscopeCenterY: kCY, tileHeight: tH, playbackSpeed: speed, filterIntensity: fIntensity, segmentFilterSettings: segFilterSettings)
                 },
                 savedEditState: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.editState ?? [:],
                 savedLockedDevices: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.lockedDevices ?? [],
@@ -173,6 +173,7 @@ struct ContentView: View {
                 savedKaleidoscopeCenterY: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.kaleidoscopeCenterY ?? 0.5,
                 savedTileHeight: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.tileHeight ?? 200,
                 savedPlaybackSpeed: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.playbackSpeed ?? 1.0,
+                savedFilterIntensity: library.records.first(where: { $0.id == sessionManager.previewSessionID })?.filterIntensity ?? 1.0,
                 onDeleteSession: {
                     library.delete(id: sessionManager.previewSessionID)
                 },
@@ -307,12 +308,14 @@ struct ContentView: View {
     private let maxContentWidth: CGFloat = 420
     
     private var roleSelectionScreen: some View {
+        GeometryReader { containerGeo in
+        ScrollView(.vertical, showsIndicators: false) {
         VStack(spacing: 0) {
             // ── ヘッダー ──
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .lastTextBaseline, spacing: 4) {
-                        (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
+                        (Text("DOUKI").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
                             .font(.system(size: 32, weight: .black, design: .default))
                             .fontWidth(.compressed)
                             .tracking(-0.5)
@@ -524,7 +527,7 @@ struct ContentView: View {
             logView
                 .padding(.horizontal, 24)
             
-            Spacer()
+            Spacer().frame(minHeight: 24)
             
             // ── MASTERボタン（接続済みピアがある時に表示） ──
             if !sessionManager.connectedPeers.isEmpty {
@@ -571,7 +574,7 @@ struct ContentView: View {
             }
             } // if connectedPeers
             
-            Spacer()
+            Spacer().frame(minHeight: 24)
             
             // ── SINGLE MODE + REBUILD SESSION（接続がない時に表示） ──
             if sessionManager.connectedPeers.isEmpty {
@@ -648,6 +651,11 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: maxContentWidth)
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: containerGeo.size.height)
+        .scrollBounceBehavior(.basedOnSize)
+        } // ScrollView
+        } // GeometryReader
     }
     
     // ノード行（CONNECTED NODES用）
@@ -731,11 +739,11 @@ struct ContentView: View {
             } else {
                 // カメラ初期化中
                 VStack(spacing: 12) {
-                    DancingLoaderView(size: 80, tint: .white.opacity(0.5))
+                    DancingLoaderView(size: 60)
                     Text("INITIALIZING CAMERAS...")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .tracking(2)
-                        .foregroundColor(.white.opacity(0.5))
+                        .foregroundColor(.white)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.ignoresSafeArea())
@@ -848,7 +856,7 @@ struct ContentView: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .lastTextBaseline, spacing: 4) {
-                                (Text("CINECAM").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
+                                (Text("DOUKI").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
                                     .font(.system(size: 32, weight: .black, design: .default))
                                     .fontWidth(.compressed)
                                     .tracking(-0.5)

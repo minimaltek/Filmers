@@ -92,8 +92,8 @@ struct LibraryView: View {
                 onRename: { newTitle in
                     library.rename(id: record.id, title: newTitle)
                 },
-                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter, pitchCents, kaleidoscope, kSize, kCX, kCY, tH, speed, segFilterSettings in
-                    library.saveEditState(id: record.id, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter, pitchCents: pitchCents, kaleidoscope: kaleidoscope, kaleidoscopeSize: kSize, kaleidoscopeCenterX: kCX, kaleidoscopeCenterY: kCY, tileHeight: tH, playbackSpeed: speed, segmentFilterSettings: segFilterSettings)
+                onSaveEditState: { segmentsByDevice, lockedDevices, audioDevice, videoFilter, pitchCents, kaleidoscope, kSize, kCX, kCY, tH, speed, fIntensity, segFilterSettings in
+                    library.saveEditState(id: record.id, segmentsByDevice: segmentsByDevice, lockedDevices: lockedDevices, audioDevice: audioDevice, videoFilter: videoFilter, pitchCents: pitchCents, kaleidoscope: kaleidoscope, kaleidoscopeSize: kSize, kaleidoscopeCenterX: kCX, kaleidoscopeCenterY: kCY, tileHeight: tH, playbackSpeed: speed, filterIntensity: fIntensity, segmentFilterSettings: segFilterSettings)
                 },
                 savedEditState: record.editState,
                 savedLockedDevices: record.lockedDevices ?? [],
@@ -106,6 +106,7 @@ struct LibraryView: View {
                 savedKaleidoscopeCenterY: record.kaleidoscopeCenterY ?? 0.5,
                 savedTileHeight: record.tileHeight ?? 200,
                 savedPlaybackSpeed: record.playbackSpeed ?? 1.0,
+                savedFilterIntensity: record.filterIntensity ?? 1.0,
                 onDeleteSession: {
                     library.delete(id: record.id)
                 },
@@ -283,19 +284,15 @@ struct LibraryView: View {
     private func generateThumbnails() {
         for record in library.records {
             guard thumbnailCache[record.id] == nil else { continue }
-            // 最初のビデオURLを取得
             guard let firstURL = record.videos.values.first else { continue }
             let recordID = record.id
-            Task.detached {
-                let asset = AVAsset(url: firstURL)
+            Task { @MainActor in
+                let asset = AVURLAsset(url: firstURL)
                 let generator = AVAssetImageGenerator(asset: asset)
                 generator.appliesPreferredTrackTransform = true
                 generator.maximumSize = CGSize(width: 128, height: 128)
-                if let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) {
-                    let uiImage = UIImage(cgImage: cgImage)
-                    await MainActor.run {
-                        thumbnailCache[recordID] = uiImage
-                    }
+                if let cgImage = try? await generator.image(at: .zero).image {
+                    thumbnailCache[recordID] = UIImage(cgImage: cgImage)
                 }
             }
         }

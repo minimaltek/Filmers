@@ -30,11 +30,11 @@ final class ExportEngine: ObservableObject {
     /// 書き出し実行 → カメラロールに保存
     /// - audioSource: nil = 編集に従う（カット毎の音声）、デバイス名 = そのデバイスの音声を全編に使用
     /// - pitchCents: ピッチシフト量（セント単位: 0 = 無効）
-    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema, audioSource: String? = nil, videoFilter: String? = nil, showWatermark: Bool = false, pitchCents: Float = 0, kaleidoscopeType: String? = nil, kaleidoscopeSize: Float = 200, kaleidoscopeCenterX: Float = 0.5, kaleidoscopeCenterY: Float = 0.5, tileHeight: Float = 200, rotationAngle: Float = 0, segmentFilterSettings: [UUID: SegmentFilterSettings] = [:], speedRate: Float = 1.0) async {
+    func export(timeline: ExclusiveEditTimeline, videos: [String: URL], orientation: VideoOrientation = .cinema, audioSource: String? = nil, videoFilter: String? = nil, showWatermark: Bool = false, pitchCents: Float = 0, kaleidoscopeType: String? = nil, kaleidoscopeSize: Float = 200, kaleidoscopeCenterX: Float = 0.5, kaleidoscopeCenterY: Float = 0.5, tileHeight: Float = 200, mirrorDirection: Int = 0, rotationAngle: Float = 0, filterIntensity: Float = 1.0, segmentFilterSettings: [UUID: SegmentFilterSettings] = [:], speedRate: Float = 1.0, noSoundExport: Bool = false) async {
         state = .exporting(progress: 0)
 
         do {
-            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation, audioSource: audioSource, videoFilter: videoFilter, showWatermark: showWatermark, pitchCents: pitchCents, kaleidoscopeType: kaleidoscopeType, kaleidoscopeSize: kaleidoscopeSize, kaleidoscopeCenterX: kaleidoscopeCenterX, kaleidoscopeCenterY: kaleidoscopeCenterY, tileHeight: tileHeight, rotationAngle: rotationAngle, segmentFilterSettings: segmentFilterSettings, speedRate: speedRate)
+            let url = try await buildAndExport(timeline: timeline, videos: videos, orientation: orientation, audioSource: audioSource, videoFilter: videoFilter, showWatermark: showWatermark, pitchCents: pitchCents, kaleidoscopeType: kaleidoscopeType, kaleidoscopeSize: kaleidoscopeSize, kaleidoscopeCenterX: kaleidoscopeCenterX, kaleidoscopeCenterY: kaleidoscopeCenterY, tileHeight: tileHeight, mirrorDirection: mirrorDirection, rotationAngle: rotationAngle, filterIntensity: filterIntensity, segmentFilterSettings: segmentFilterSettings, speedRate: speedRate, noSoundExport: noSoundExport)
             // カメラロールに保存（失敗したら .done には絶対到達しない）
             do {
                 try await saveToPhotoLibrary(url: url)
@@ -94,9 +94,12 @@ final class ExportEngine: ObservableObject {
         kaleidoscopeCenterX: Float = 0.5,
         kaleidoscopeCenterY: Float = 0.5,
         tileHeight: Float = 200,
+        mirrorDirection: Int = 0,
         rotationAngle: Float = 0,
+        filterIntensity: Float = 1.0,
         segmentFilterSettings: [UUID: SegmentFilterSettings] = [:],
-        speedRate: Float = 1.0
+        speedRate: Float = 1.0,
+        noSoundExport: Bool = false
     ) async throws -> URL {
 
         // ① 使用するセグメントを trimIn 順に並べる
@@ -137,14 +140,14 @@ final class ExportEngine: ObservableObject {
 
         // ③ AVMutableComposition + per-clip instructions
         let composition = AVMutableComposition()
-        let videoTrack = composition.addMutableTrack(
+        guard let videoTrack = composition.addMutableTrack(
             withMediaType: .video,
             preferredTrackID: kCMPersistentTrackID_Invalid
-        )!
-        let audioTrack = composition.addMutableTrack(
+        ) else { throw ExportError.compositionFailed("videoTrack の作成に失敗しました") }
+        guard let audioTrack = composition.addMutableTrack(
             withMediaType: .audio,
             preferredTrackID: kCMPersistentTrackID_Invalid
-        )!
+        ) else { throw ExportError.compositionFailed("audioTrack の作成に失敗しました") }
 
         // Track each clip's position in the composition timeline
         struct ClipRange {
@@ -171,7 +174,10 @@ final class ExportEngine: ObservableObject {
         }
 
         // ③-b 音声トラックを構築
-        if let audioDevice = audioSource, let audioURL = videos[audioDevice] {
+        // noSoundExport = true のとき（グローバル NO SOUND）は音声トラックを一切追加しない
+        if noSoundExport {
+            composition.removeTrack(audioTrack)
+        } else if let audioDevice = audioSource, let audioURL = videos[audioDevice] {
             // 特定デバイスの音声を使用: 各クリップの区間に対応する音声を挿入
             let audioAsset = AVURLAsset(url: audioURL)
             if let srcAudioTrack = try? await audioAsset.loadTracks(withMediaType: .audio).first {
@@ -206,14 +212,19 @@ final class ExportEngine: ObservableObject {
             }
         } else {
             // 編集に従う: 各クリップ自身の音声を使用
+            // ただし segmentFilterSettings で noSound = true のセグメントは無音（無音区間を挿入）
             var audioCursor = CMTime.zero
             for clip in orderedClips {
-                let asset = AVURLAsset(url: clip.url)
                 let duration = clip.sourceOut - clip.sourceIn
-                let timeRange = CMTimeRange(start: clip.sourceIn, duration: duration)
-                if let srcAudio = try? await asset.loadTracks(withMediaType: .audio).first {
-                    try? audioTrack.insertTimeRange(timeRange, of: srcAudio, at: audioCursor)
+                let isNoSound = segmentFilterSettings[clip.segmentID]?.noSound ?? false
+                if !isNoSound {
+                    let asset = AVURLAsset(url: clip.url)
+                    let timeRange = CMTimeRange(start: clip.sourceIn, duration: duration)
+                    if let srcAudio = try? await asset.loadTracks(withMediaType: .audio).first {
+                        try? audioTrack.insertTimeRange(timeRange, of: srcAudio, at: audioCursor)
+                    }
                 }
+                // noSound セグメントは音声を挿入せず cursor だけ進める（無音区間になる）
                 audioCursor = audioCursor + duration
             }
         }
@@ -276,24 +287,34 @@ final class ExportEngine: ObservableObject {
 
         // ③-d ピッチシフト適用: composition の音声を書き出し → オフラインピッチ処理 → 差し替え
         //     ★ scaleTimeRange 後に実行する（スピード変更済みの音声をピッチシフトする）
+        //     セグメント固有 pitchCents が設定されている場合はグローバル pitchCents より優先する
+        //     （複数のセグメントで異なる pitch が混在する場合は、最初に見つかったセグメント固有値を使用）
+        let effectivePitchCents: Float = {
+            // セグメント固有の pitch を検索（0以外の値を持つ最初のセグメントを採用）
+            for clip in orderedClips {
+                let segPitch = segmentFilterSettings[clip.segmentID]?.pitchCents ?? 0
+                if segPitch != 0 { return segPitch }
+            }
+            return pitchCents
+        }()
         var pitchedTempURL: URL? = nil  // エクスポート完了まで削除を遅延するため保持
         let activeAudioTracks = composition.tracks(withMediaType: .audio)
-        if pitchCents != 0, let currentAudioTrack = activeAudioTracks.first,
+        if effectivePitchCents != 0, let currentAudioTrack = activeAudioTracks.first,
            currentAudioTrack.timeRange.duration != .zero {
             let pitchedURL = try await renderPitchShiftedAudio(
                 composition: composition,
                 audioTrack: currentAudioTrack,
-                pitchCents: pitchCents
+                pitchCents: effectivePitchCents
             )
             pitchedTempURL = pitchedURL
             // 元の音声トラックを全て削除し、ピッチ済み音声で差し替え
             for t in composition.tracks(withMediaType: .audio) {
                 composition.removeTrack(t)
             }
-            let newAudioTrack = composition.addMutableTrack(
+            guard let newAudioTrack = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
-            )!
+            ) else { throw ExportError.compositionFailed("newAudioTrack の作成に失敗しました") }
             let pitchedAsset = AVURLAsset(url: pitchedURL)
             if let pitchedSrc = try? await pitchedAsset.loadTracks(withMediaType: .audio).first {
                 let pitchedDuration = try await pitchedAsset.load(.duration)
@@ -359,14 +380,9 @@ final class ExportEngine: ObservableObject {
 
         videoComp.instructions = instructions
 
-        // ④-b 透かし: CALayer 方式で Pass 1 に焼き込む
-        if showWatermark {
-            Self.applyWatermarkLayer(to: videoComp, renderSize: renderSize)
-        }
-
-        // ④-c フィルタが必要な場合のみ 2パス方式
+        // ④-b 透かし/フィルタが必要な場合は 2パス方式（CIImage 合成で確実に焼き込む）
         let hasPerSegmentFilters = !segmentFilterSettings.isEmpty
-        let needsSecondPass = videoFilter != nil || kaleidoscopeType != nil || hasPerSegmentFilters
+        let needsSecondPass = videoFilter != nil || kaleidoscopeType != nil || hasPerSegmentFilters || showWatermark
 
         // ⑤ Export (1パス目: 回転・クロップ済み)
         let pass1URL = needsSecondPass
@@ -452,7 +468,9 @@ final class ExportEngine: ObservableObject {
                 kaleidoscopeCenterX: kaleidoscopeCenterX,
                 kaleidoscopeCenterY: kaleidoscopeCenterY,
                 tileHeight: tileHeight,
-                rotationAngle: rotationAngle
+                mirrorDirection: mirrorDirection,
+                rotationAngle: rotationAngle,
+                filterIntensity: filterIntensity
             )
             filterRanges.append(FilterRange(
                 start: range.compositionStart,
@@ -460,6 +478,9 @@ final class ExportEngine: ObservableObject {
                 settings: effective
             ))
         }
+
+        // 透かし用 CIImage を事前にロード（クロージャ外で1回だけ）
+        let watermarkCI: CIImage? = showWatermark ? Self.loadWatermarkCIImage(renderSize: renderSize) : nil
 
         let ciComp = try await AVMutableVideoComposition.videoComposition(
             with: pass1Asset,
@@ -496,8 +517,19 @@ final class ExportEngine: ObservableObject {
                         centerY: settings.kaleidoscopeCenterY,
                         tileHeight: settings.tileHeight,
                         mirrorDirection: settings.mirrorDirection,
-                        rotationAngle: angle
+                        rotationAngle: angle,
+                        filterIntensity: settings.filterIntensity
                     )
+                }
+
+                // 透かしを CIImage 合成で焼き込む（フィルタ適用後）
+                if let wm = watermarkCI,
+                   let composite = CIFilter(name: "CISourceOverCompositing") {
+                    composite.setValue(wm, forKey: kCIInputImageKey)
+                    composite.setValue(image, forKey: kCIInputBackgroundImageKey)
+                    if let out = composite.outputImage {
+                        image = out
+                    }
                 }
 
                 request.finish(with: image, context: nil)
@@ -566,9 +598,9 @@ final class ExportEngine: ObservableObject {
 
         // 音声だけの composition を作成
         let audioComp = AVMutableComposition()
-        let tempTrack = audioComp.addMutableTrack(
+        guard let tempTrack = audioComp.addMutableTrack(
             withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
-        )!
+        ) else { throw ExportError.compositionFailed("tempTrack の作成に失敗しました") }
         try tempTrack.insertTimeRange(audioTrack.timeRange, of: audioTrack, at: .zero)
 
         guard let audioExport = AVAssetExportSession(
@@ -739,55 +771,51 @@ final class ExportEngine: ObservableObject {
         return cropTransform
     }
 
-    // MARK: - Watermark (CALayer 方式)
+    // MARK: - Watermark (CIImage 合成方式)
 
-    /// AVVideoComposition に CALayer ベースの透かしロゴを追加する
-    /// AVVideoCompositionCoreAnimationTool を使用し、確実に映像に焼き込む
-    private static func applyWatermarkLayer(to videoComp: AVMutableVideoComposition, renderSize: CGSize) {
-        // ロゴ画像読み込み（Image Set → バンドル直接のフォールバック）
+    /// 透かしロゴを CIImage として読み込み、右下に配置・半透明化した状態で返す
+    /// 毎フレーム composited(over:) するだけで済むよう、位置・サイズ・透明度を事前に適用
+    private static func loadWatermarkCIImage(renderSize: CGSize) -> CIImage? {
+        // ロゴ画像読み込み（Asset Catalog → バンドル直接のフォールバック）
         let logo: UIImage? = UIImage(named: "WatermarkLogo")
             ?? Bundle.main.url(forResource: "Cinecam_logo_white", withExtension: "png")
                 .flatMap { try? Data(contentsOf: $0) }
                 .flatMap { UIImage(data: $0) }
-        guard let logo, let logoCGImage = logo.cgImage else {
+        guard let logo, let cgImage = logo.cgImage else {
             print("⚠️ [Watermark] Logo image not found")
-            return
+            return nil
         }
 
-        let margin = renderSize.width * 0.025
-        let logoTargetWidth = renderSize.width * 0.08
+        let margin = renderSize.width * 0.015
+        let logoTargetWidth = renderSize.width * 0.06  // 映像幅の6%（元の0.5倍）
         let logoScale = logoTargetWidth / logo.size.width
         let logoW = logo.size.width * logoScale
-        let logoH = logo.size.height * logoScale
 
-        // ロゴレイヤー（右下配置、CALayer は左下原点）
-        let logoLayer = CALayer()
-        logoLayer.contents = logoCGImage
-        logoLayer.opacity = 0.35
-        logoLayer.shadowColor = UIColor.black.cgColor
-        logoLayer.shadowOffset = CGSize(width: 1, height: -1)
-        logoLayer.shadowOpacity = 0.7
-        logoLayer.shadowRadius = 3
-        logoLayer.frame = CGRect(
-            x: renderSize.width - logoW - margin,
-            y: margin,  // CALayer: 左下原点 → y=margin で右下に配置
-            width: logoW,
-            height: logoH
-        )
+        // CIImage に変換 → スケール → 半透明 → 右下に配置
+        var ci = CIImage(cgImage: cgImage)
 
-        // 親レイヤー + ビデオレイヤー
-        let videoLayer = CALayer()
-        videoLayer.frame = CGRect(origin: .zero, size: renderSize)
+        // スケール
+        let scaleTransform = CGAffineTransform(scaleX: logoScale, y: logoScale)
+        ci = ci.transformed(by: scaleTransform)
 
-        let parentLayer = CALayer()
-        parentLayer.frame = CGRect(origin: .zero, size: renderSize)
-        parentLayer.addSublayer(videoLayer)
-        parentLayer.addSublayer(logoLayer)
+        // 半透明（CIColorMatrix で alpha を下げる）
+        if let alphaFilter = CIFilter(name: "CIColorMatrix") {
+            alphaFilter.setValue(ci, forKey: kCIInputImageKey)
+            alphaFilter.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
+            alphaFilter.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
+            alphaFilter.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
+            alphaFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0.25), forKey: "inputAVector")
+            if let out = alphaFilter.outputImage {
+                ci = out
+            }
+        }
 
-        videoComp.animationTool = AVVideoCompositionCoreAnimationTool(
-            postProcessingAsVideoLayer: videoLayer,
-            in: parentLayer
-        )
+        // 右下に配置（CIImage 座標系: 左下原点）
+        let tx = renderSize.width - logoW - margin
+        let ty = margin  // 左下原点 → y=margin で右下配置
+        ci = ci.transformed(by: CGAffineTransform(translationX: tx, y: ty))
+
+        return ci
     }
 
     // MARK: - Errors
@@ -797,13 +825,15 @@ final class ExportEngine: ObservableObject {
         case sessionFailed
         case cancelled
         case photoLibraryDenied
+        case compositionFailed(String)
 
         var errorDescription: String? {
             switch self {
-            case .noClips:            return "No clips to export"
-            case .sessionFailed:      return "Failed to create export session"
-            case .cancelled:          return "Export was cancelled"
-            case .photoLibraryDenied: return "Photo library access denied. Please allow access in Settings."
+            case .noClips:                   return "No clips to export"
+            case .sessionFailed:             return "Failed to create export session"
+            case .cancelled:                 return "Export was cancelled"
+            case .photoLibraryDenied:        return "Photo library access denied. Please allow access in Settings."
+            case .compositionFailed(let msg): return msg
             }
         }
     }

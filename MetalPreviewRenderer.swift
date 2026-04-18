@@ -91,6 +91,67 @@ final class MetalPreviewRenderer: NSObject, MTKViewDelegate {
         mtkView?.setNeedsDisplay()
     }
 
+    // MARK: - Pipeline Warm-up
+
+    /// Metal CIFilter シェーダパイプラインを事前コンパイルする。
+    /// 初回フレーム描画時の "building pipeline" による数秒の固まりを防ぐため、
+    /// setupAll() 内の isReady = true より前に呼ぶこと。
+    func warmUpPipeline() async {
+        let ciCtx = self.ciContext
+        let mtlDevice = self.device
+        await Task.detached(priority: .userInitiated) {
+            guard let commandQueue = mtlDevice.makeCommandQueue() else { return }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: 64,
+                height: 64,
+                mipmapped: false
+            )
+            descriptor.usage = [.renderTarget, .shaderWrite, .shaderRead]
+            guard let texture = mtlDevice.makeTexture(descriptor: descriptor) else { return }
+
+            // ウォームアップ対象フィルタ名のリスト（nil = フィルタなし）
+            // CIRenderDestination + commandBuffer 経由でレンダリングすることで
+            // draw(in:) と同じ Metal パイプラインが事前コンパイルされる
+            let filterNames: [String?] = [
+                nil,                    // フィルタなし（基本パイプライン）
+                "CIColorControls",      // 彩度・コントラスト系（custom_vivid など）
+                "CIPhotoEffectNoir",    // モノクロ系
+                "CIColorPosterize",     // ポスタライズ
+                "CIBloom",              // ブルーム
+                "CIEdges",              // エッジ検出（custom_comic）
+            ]
+
+            for filterName in filterNames {
+                guard let commandBuffer = commandQueue.makeCommandBuffer() else { continue }
+                let rect = CGRect(x: 0, y: 0, width: 64, height: 64)
+                var image = CIImage(color: CIColor(red: 0.3, green: 0.3, blue: 0.3))
+                    .cropped(to: rect)
+                if let name = filterName, let f = CIFilter(name: name) {
+                    f.setValue(image, forKey: kCIInputImageKey)
+                    if let out = f.outputImage?.cropped(to: rect) {
+                        image = out
+                    }
+                }
+                let dest = CIRenderDestination(
+                    width: 64,
+                    height: 64,
+                    pixelFormat: .bgra8Unorm,
+                    commandBuffer: commandBuffer,
+                    mtlTextureProvider: { texture }
+                )
+                dest.isFlipped = false
+                _ = try? ciCtx.startTask(toRender: image, to: dest)
+                // addCompletedHandler は commit() より前に登録する必要がある
+                // （commit後に完了している場合、ハンドラが呼ばれない可能性があるため）
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    commandBuffer.addCompletedHandler { _ in continuation.resume() }
+                    commandBuffer.commit()
+                }
+            }
+        }.value
+    }
+
     // MARK: - Transform Helpers
 
     /// preferredTransform を正規化する（エクスポートエンジンと同一ロジック）。
@@ -193,7 +254,9 @@ final class MetalPreviewRenderer: NSObject, MTKViewDelegate {
                     centerY: params.centerY,
                     tileHeight: params.tileHeight,
                     mirrorDirection: params.mirrorDirection,
-                    rotationAngle: params.rotationAngle
+                    rotationAngle: params.rotationAngle,
+                    displayAspectRatio: params.displayAspectRatio,
+                    filterIntensity: params.filterIntensity
                 )
             }
         }

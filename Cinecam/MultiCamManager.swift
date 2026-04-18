@@ -382,29 +382,24 @@ class MultiCamManager: NSObject, ObservableObject {
     /// 端末の向きが変わった時に、全接続のorientationを更新
     func updateOrientationForConnections() {
         let orientation = CameraManager.currentCaptureOrientation()
+        // 録画接続は sessionQueue で更新
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            // 背面カメラ録画接続
             if let conn = self.backOutput?.connection(with: .video),
                conn.isVideoOrientationSupported {
                 conn.videoOrientation = orientation
             }
-            // 前面カメラ録画接続
             if let conn = self.frontOutput?.connection(with: .video),
                conn.isVideoOrientationSupported {
                 conn.videoOrientation = orientation
             }
-            // プレビュー接続
-            DispatchQueue.main.async {
-                if let conn = self.backPreviewLayer?.connection,
-                   conn.isVideoOrientationSupported {
-                    conn.videoOrientation = orientation
-                }
-                if let conn = self.frontPreviewLayer?.connection,
-                   conn.isVideoOrientationSupported {
-                    conn.videoOrientation = orientation
-                }
-            }
+        }
+        // プレビュー接続はメインスレッドで直接更新（CALayer はメインスレッド専用）
+        if let conn = backPreviewLayer?.connection, conn.isVideoOrientationSupported {
+            conn.videoOrientation = orientation
+        }
+        if let conn = frontPreviewLayer?.connection, conn.isVideoOrientationSupported {
+            conn.videoOrientation = orientation
         }
     }
     
@@ -499,6 +494,13 @@ class MultiCamManager: NSObject, ObservableObject {
         timer?.invalidate()
         timer = nil
     }
+
+    deinit {
+        stopTimer()
+        sessionQueue.async { [weak self] in
+            self?.multiCamSession?.stopRunning()
+        }
+    }
 }
 
 // MARK: - AVCaptureFileOutputRecordingDelegate
@@ -514,25 +516,28 @@ extension MultiCamManager: AVCaptureFileOutputRecordingDelegate {
     }
     
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
-        if output === backOutput {
-            backFinished = true
-            backFinalURL = outputFileURL
-        } else if output === frontOutput {
-            frontFinished = true
-            frontFinalURL = outputFileURL
-        }
-        
-        guard backFinished && frontFinished else { return }
-        let currentSessionID = self.sessionID
-        self.recordingStartTime = nil
-        
-        if let backURL = backFinalURL, let frontURL = frontFinalURL, !currentSessionID.isEmpty {
-            DispatchQueue.main.async {
+        // backFinished / frontFinished の読み書きをすべてメインスレッドに統一し
+        // 複数スレッドからの非アトミックなアクセスによる競合を防ぐ
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if output === self.backOutput {
+                self.backFinished = true
+                self.backFinalURL = outputFileURL
+            } else if output === self.frontOutput {
+                self.frontFinished = true
+                self.frontFinalURL = outputFileURL
+            }
+
+            guard self.backFinished && self.frontFinished else { return }
+            let currentSessionID = self.sessionID
+            self.recordingStartTime = nil
+
+            if let backURL = self.backFinalURL, let frontURL = self.frontFinalURL, !currentSessionID.isEmpty {
                 self.onRecordingCompleted?(backURL, frontURL, currentSessionID)
             }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.sessionID = ""
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.sessionID = ""
+            }
         }
     }
 }

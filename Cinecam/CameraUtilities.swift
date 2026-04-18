@@ -97,25 +97,6 @@ enum CameraHelper {
         }
     }
     
-    /// カメラデバイスタイプのラベルを取得
-    static func label(for deviceType: AVCaptureDevice.DeviceType) -> String {
-        switch deviceType {
-        case .builtInUltraWideCamera:
-            return "超広角\n(0.5x)"
-        case .builtInWideAngleCamera:
-            return "広角\n(1x)"
-        case .builtInTelephotoCamera:
-            return "望遠\n(2x)"
-        case .builtInTripleCamera:
-            return "トリプル"
-        case .builtInDualCamera:
-            return "デュアル"
-        case .builtInDualWideCamera:
-            return "デュアル広角"
-        default:
-            return "カメラ"
-        }
-    }
     
     /// 利用可能なバックカメラをズームラベルで重複排除して取得
     /// 同じラベル（例: "1×"）を持つ複数デバイスのうち最初の1台だけを返す

@@ -333,8 +333,8 @@ struct SingleModeOverlayControls: View {
                             multiCamManager.setExposureBias(exposureDragStartBias + delta)
                         }
                     }
-                    .onEnded { _ in
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    .onEnded { value in
+                        if isDraggingExposure {
                             isDraggingExposure = false
                         }
                     }
