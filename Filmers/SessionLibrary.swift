@@ -1,6 +1,6 @@
 //
 //  SessionLibrary.swift
-//  Douki
+//  Filmers
 //
 //  撮影済みセッションの履歴管理（UserDefaults に永続化）
 //

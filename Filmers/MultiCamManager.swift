@@ -1,6 +1,6 @@
 //
 //  MultiCamManager.swift
-//  Douki
+//  Filmers
 //
 //  Single-device dual-camera recording using AVCaptureMultiCamSession
 //
@@ -127,8 +127,8 @@ class MultiCamManager: NSObject, ObservableObject {
         let deviceName = UIDevice.current.name.replacingOccurrences(of: " ", with: "_")
         let ts = Int(timestamp)
         
-        let backFileName = "douki_\(sessionID)_\(deviceName)_BACK_\(ts).mov"
-        let frontFileName = "douki_\(sessionID)_\(deviceName)_FRONT_\(ts).mov"
+        let backFileName = "filmers_\(sessionID)_\(deviceName)_BACK_\(ts).mov"
+        let frontFileName = "filmers_\(sessionID)_\(deviceName)_FRONT_\(ts).mov"
         
         let backURL = FileManager.default.temporaryDirectory.appendingPathComponent(backFileName)
         let frontURL = FileManager.default.temporaryDirectory.appendingPathComponent(frontFileName)

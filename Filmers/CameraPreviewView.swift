@@ -1,6 +1,6 @@
 //
 //  CameraPreviewView.swift
-//  Douki
+//  Filmers
 //
 //  Phase 2: カメラプレビュー表示
 //

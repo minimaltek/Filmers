@@ -1,6 +1,6 @@
 //
 //  CameraManager.swift
-//  Douki
+//  Filmers
 //
 //  Phase 2: カメラ録画機能
 //
@@ -9,7 +9,7 @@ import Foundation
 import AVFoundation
 import UIKit
 import CoreImage
-// Photos framework は不要（カメラロールへの保存は DoukiExportEngine で行う）
+// Photos framework は不要（カメラロールへの保存は FilmersExportEngine で行う）
 import Combine
 
 class CameraManager: NSObject, ObservableObject {
@@ -811,7 +811,7 @@ class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        let fileName = "douki_\(sessionID)_\(UIDevice.current.name.replacingOccurrences(of: " ", with: "_"))_\(Int(timestamp)).mov"
+        let fileName = "filmers_\(sessionID)_\(UIDevice.current.name.replacingOccurrences(of: " ", with: "_"))_\(Int(timestamp)).mov"
         let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: fileURL)
         currentVideoURL = fileURL

@@ -1,6 +1,6 @@
 //
 //  DancingLoaderView.swift
-//  Douki
+//  Filmers
 //
 //  SwiftUI 棒人形ランニングアニメーション ローディング表示
 //  8コマのキーフレームアニメーション（コマ送り方式）

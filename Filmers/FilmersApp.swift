@@ -1,6 +1,6 @@
 //
-//  DoukiApp.swift
-//  Douki
+//  FilmersApp.swift
+//  Filmers
 //
 //  Created by minimaltek on 2026/02/16.
 //
@@ -69,7 +69,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 }
 
 @main
-struct DoukiApp: App {
+struct FilmersApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {

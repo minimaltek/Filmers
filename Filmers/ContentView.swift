@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  Douki
+//  Filmers
 //
 //  Multi-device synchronized camera app
 //
@@ -319,9 +319,6 @@ struct ContentView: View {
                             .font(.system(size: 32, weight: .black, design: .default))
                             .fontWidth(.compressed)
                             .tracking(-0.5)
-                        Text("v041")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.5))
                     }
                     
                     if sessionManager.connectionState == .connected {
@@ -859,9 +856,6 @@ struct ContentView: View {
                                     .font(.system(size: 32, weight: .black, design: .default))
                                     .fontWidth(.compressed)
                                     .tracking(-0.5)
-                                Text("v041")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.5))
                             }
                             
                             HStack(spacing: 6) {

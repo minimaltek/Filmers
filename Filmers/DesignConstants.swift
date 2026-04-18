@@ -1,6 +1,6 @@
 //
 //  DesignConstants.swift
-//  Douki
+//  Filmers
 //
 //  デザイン関連の定数定義
 //

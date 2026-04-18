@@ -1,6 +1,6 @@
 //
 //  MultiCamPreviewView.swift
-//  Douki
+//  Filmers
 //
 //  Dual-camera preview: active camera full-screen + inactive camera PiP
 //  Uses a single UIViewRepresentable to avoid CALayer hierarchy issues

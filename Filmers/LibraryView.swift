@@ -1,6 +1,6 @@
 //
 //  LibraryView.swift
-//  Douki
+//  Filmers
 //
 //  撮影済みセッションの一覧画面
 //

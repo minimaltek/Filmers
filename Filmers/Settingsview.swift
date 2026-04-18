@@ -1,6 +1,6 @@
 //
 //  SettingsView.swift
-//  Douki
+//  Filmers
 //
 //  カメラ設定画面
 //
@@ -8,21 +8,143 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import StoreKit
 
 // MARK: - Purchase Manager
 
-/// 課金状態を管理するシングルトン
-/// 開発中は UserDefaults で管理、リリース時は StoreKit に移行
+/// 課金状態を管理するシングルトン（StoreKit 2 買い切り）
+/// Product ID: com.douki.app.pro
+@MainActor
 class PurchaseManager: ObservableObject {
     static let shared = PurchaseManager()
 
-    @Published var isPremium: Bool {
-        didSet { UserDefaults.standard.set(isPremium, forKey: "douki.isPremium") }
-    }
+    /// プロダクトID（App Store Connect で登録したIDに合わせること）
+    static let productID = "douki.premium"
+
+    @Published private(set) var isPremium: Bool = false
+    @Published private(set) var product: Product? = nil
+    @Published private(set) var isLoading: Bool = false
+    @Published private(set) var errorMessage: String? = nil
+
+    private var transactionListenerTask: Task<Void, Never>?
 
     init() {
-        isPremium = UserDefaults.standard.bool(forKey: "douki.isPremium")
+        transactionListenerTask = listenForTransactions()
+        Task { await refreshStatus() }
     }
+
+    deinit {
+        transactionListenerTask?.cancel()
+    }
+
+    // MARK: - 購入
+
+    func purchase() async {
+        guard let product else { return }
+        isLoading = true
+        errorMessage = nil
+        do {
+            let result = try await product.purchase()
+            switch result {
+            case .success(let verification):
+                let transaction = try checkVerified(verification)
+                await transaction.finish()
+                isPremium = true
+            case .userCancelled:
+                break
+            case .pending:
+                break
+            @unknown default:
+                break
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    // MARK: - リストア
+
+    func restore() async {
+        isLoading = true
+        errorMessage = nil
+        do {
+            try await AppStore.sync()
+            await refreshStatus()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    // MARK: - 状態更新
+
+    func refreshStatus() async {
+        // プロダクト情報取得
+        if product == nil {
+            do {
+                let products = try await Product.products(for: [Self.productID])
+                product = products.first
+            } catch {
+                // ネットワーク不可時はスキップ
+            }
+        }
+        // 購入済みトランザクション確認
+        for await result in Transaction.currentEntitlements {
+            if case .verified(let transaction) = result,
+               transaction.productID == Self.productID,
+               transaction.revocationDate == nil {
+                isPremium = true
+                return
+            }
+        }
+        // デバッグ時は UserDefaults フォールバック
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "douki.isPremium") {
+            isPremium = true
+        }
+        #endif
+    }
+
+    // MARK: - トランザクションリスナー
+
+    private func listenForTransactions() -> Task<Void, Never> {
+        Task(priority: .background) { [weak self] in
+            for await result in Transaction.updates {
+                guard let self else { return }
+                if case .verified(let transaction) = result,
+                   transaction.productID == Self.productID,
+                   transaction.revocationDate == nil {
+                    await MainActor.run { self.isPremium = true }
+                    await transaction.finish()
+                }
+            }
+        }
+    }
+
+    // MARK: - 検証ヘルパー
+
+    private func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {
+        switch result {
+        case .unverified:
+            throw StoreError.failedVerification
+        case .verified(let value):
+            return value
+        }
+    }
+
+    enum StoreError: Error {
+        case failedVerification
+    }
+
+    // MARK: - DEBUG only
+
+    #if DEBUG
+    func debugSetPremium(_ value: Bool) {
+        isPremium = value
+        UserDefaults.standard.set(value, forKey: "douki.isPremium")
+    }
+    #endif
 }
 
 // MARK: - Settings View
@@ -111,18 +233,90 @@ struct SettingsView: View {
                             .font(.caption)
                     }
 
+                    // ── Filmers Pro ──────────────────────────────
+                    Section {
+                        if purchaseManager.isPremium {
+                            HStack {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .foregroundColor(.cyan)
+                                Text("Filmers Pro")
+                                    .foregroundColor(.white)
+                                Spacer()
+                                Text("Active")
+                                    .font(.caption)
+                                    .foregroundColor(.cyan)
+                            }
+                            .listRowBackground(Color.white.opacity(0.08))
+                        } else {
+                            // 購入ボタン
+                            Button(action: {
+                                Task { await purchaseManager.purchase() }
+                            }) {
+                                HStack {
+                                    if purchaseManager.isLoading {
+                                        ProgressView()
+                                            .tint(.white)
+                                    } else {
+                                        Image(systemName: "star.fill")
+                                            .foregroundColor(.yellow)
+                                        Text(purchaseManager.product != nil
+                                             ? "Upgrade to Filmers Pro  \(purchaseManager.product!.displayPrice)"
+                                             : "Upgrade to Filmers Pro")
+                                            .foregroundColor(.white)
+                                    }
+                                    Spacer()
+                                }
+                            }
+                            .disabled(purchaseManager.isLoading || purchaseManager.product == nil)
+                            .listRowBackground(Color.white.opacity(0.08))
+
+                            // リストアボタン
+                            Button(action: {
+                                Task { await purchaseManager.restore() }
+                            }) {
+                                HStack {
+                                    Image(systemName: "arrow.clockwise")
+                                        .foregroundColor(.gray)
+                                    Text("Restore Purchase")
+                                        .foregroundColor(.gray)
+                                    Spacer()
+                                }
+                            }
+                            .disabled(purchaseManager.isLoading)
+                            .listRowBackground(Color.white.opacity(0.08))
+                        }
+
+                        // エラー表示
+                        if let err = purchaseManager.errorMessage {
+                            Text(err)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .listRowBackground(Color.white.opacity(0.08))
+                        }
+                    } header: {
+                        Text("Filmers Pro")
+                    } footer: {
+                        Text(purchaseManager.isPremium
+                             ? "Exporting without watermark."
+                             : "Remove the Filmers watermark from exported videos.")
+                            .font(.caption)
+                    }
+
                     #if DEBUG
                     // ── Developer ──────────────────────────────
                     Section {
-                        Toggle("Premium Mode", isOn: $purchaseManager.isPremium)
-                            .tint(.cyan)
-                            .listRowBackground(Color.white.opacity(0.08))
+                        Toggle("Premium Mode (Debug)", isOn: Binding(
+                            get: { purchaseManager.isPremium },
+                            set: { purchaseManager.debugSetPremium($0) }
+                        ))
+                        .tint(.cyan)
+                        .listRowBackground(Color.white.opacity(0.08))
                     } header: {
                         Text("Developer")
                     } footer: {
                         Text(purchaseManager.isPremium
                              ? "Export without watermark"
-                             : "Export with Douki watermark")
+                             : "Export with Filmers watermark")
                             .font(.caption)
                     }
                     #endif

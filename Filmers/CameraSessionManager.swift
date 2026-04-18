@@ -1,6 +1,6 @@
 //
 //  CameraSessionManager.swift
-//  Douki
+//  Filmers
 //
 //  Phase 1: MultipeerConnectivity 接続機能
 //
@@ -1459,7 +1459,13 @@ class CameraSessionManager: NSObject, ObservableObject {
                 if let orientationRaw = command["orientation"] as? String,
                    let orientation = VideoOrientation(rawValue: orientationRaw) {
                     self.cameraManager?.desiredOrientation = orientation
-                    self.addLog("Orientation synced: \(orientationRaw)")
+                    let orientationLabel: String
+                    switch orientation {
+                    case .cinema:    orientationLabel = "Cinema (2.39:1)"
+                    case .landscape: orientationLabel = "Landscape (16:9)"
+                    case .portrait:  orientationLabel = "Portrait (9:16)"
+                    }
+                    self.addLog("Orientation synced: \(orientationLabel)")
                 }
                 
                 // ★ プレビュー/編集画面を表示中なら閉じる

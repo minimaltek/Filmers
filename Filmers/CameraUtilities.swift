@@ -1,6 +1,6 @@
 //
 //  CameraUtilities.swift
-//  Douki
+//  Filmers
 //
 //  共通のユーティリティ関数と定数
 //

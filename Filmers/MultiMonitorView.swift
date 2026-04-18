@@ -1,6 +1,6 @@
 //
 //  MultiMonitorView.swift
-//  Douki
+//  Filmers
 //
 //  マルチモニタービュー: 接続中の全デバイスのカメラスナップショットをタイル表示
 //

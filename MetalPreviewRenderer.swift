@@ -1,6 +1,6 @@
 //
 //  MetalPreviewRenderer.swift
-//  Douki
+//  Filmers
 //
 //  Metal ベースのプレビューレンダリング。
 //  AVPlayerItemVideoOutput からフレームを取得し、CIFilter 適用後に MTKView に描画する。
