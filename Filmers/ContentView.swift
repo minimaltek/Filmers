@@ -655,6 +655,12 @@ struct ContentView: View {
         .scrollBounceBehavior(.basedOnSize)
         } // ScrollView
         } // GeometryReader
+        // iPhone: 役割選択画面は常に縦固定
+        .onAppear {
+            if UIDevice.current.userInterfaceIdiom != .pad {
+                OrientationLock.isCameraActive = false
+            }
+        }
     }
     
     // ノード行（CONNECTED NODES用）
@@ -986,6 +992,18 @@ struct ContentView: View {
             // 転送中プログレス表示
             if sessionManager.isTransferring {
                 transferProgressView
+            }
+        }
+        // iPhone: isCameraReady に連動して回転ロックを切り替える
+        // 撮影画面(isCameraReady=true)のみ回転許可、接続画面は縦固定
+        .onAppear {
+            if UIDevice.current.userInterfaceIdiom != .pad {
+                OrientationLock.isCameraActive = sessionManager.isCameraReady
+            }
+        }
+        .onChange(of: sessionManager.isCameraReady) { isReady in
+            if UIDevice.current.userInterfaceIdiom != .pad {
+                OrientationLock.isCameraActive = isReady
             }
         }
     }

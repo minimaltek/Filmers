@@ -997,9 +997,6 @@ class CameraSessionManager: NSObject, ObservableObject {
         isWaitingForCameraReady = true
         cameraReadyPeers = []
         
-        // カメラ起動 → 撮影画面は傾きに追従（回転許可）
-        OrientationLock.isCameraActive = true
-        
         // 先に自分のカメラを起動（完了後にコマンド送信）
         cameraManager?.setupCamera()
         
@@ -1565,9 +1562,6 @@ class CameraSessionManager: NSObject, ObservableObject {
     
     /// カメラ起動処理（スレーブ用）
     private func handleStartCamera(fromPeer peer: MCPeerID) {
-        // カメラ起動 → 撮影画面は傾きに追従（回転許可）
-        OrientationLock.isCameraActive = true
-
         // ★ 既にカメラが起動中なら再セットアップをスキップ（再接続時のオーバーヘッド削減）
         if cameraManager?.isCameraSessionRunning == true {
             addLog("Camera already running – sending camera_ready immediately")

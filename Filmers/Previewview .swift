@@ -1885,6 +1885,12 @@ struct PreviewView: View {
                 }
             }
         }
+        .onAppear {
+            // 編集画面は縦固定（iPhone のみ。iPad は OrientationLock に依存せず常に全方向許可）
+            if UIDevice.current.userInterfaceIdiom != .pad {
+                OrientationLock.isCameraActive = false
+            }
+        }
         .task {
             currentTitle = sessionTitle
             try? await Task.sleep(nanoseconds: 400_000_000)
