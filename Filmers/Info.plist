@@ -8,16 +8,18 @@
 	</array>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_douki-sync._tcp</string>
-		<string>_douki-sync._udp</string>
+		<string>_filmers-sync._tcp</string>
+		<string>_filmers-sync._udp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>複数デバイスで同期撮影するためにカメラを使用します。</string>
+	<string>Filmers uses the camera to record synchronized video across multiple devices.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>動画の音声を録音するためにマイクを使用します。</string>
+	<string>Filmers uses the microphone to record audio together with your video.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>近くのデバイスを検出・接続するためにローカルネットワークを使用します。</string>
+	<string>Filmers uses the local network to discover and connect to nearby devices for synchronized recording.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>編集した動画をカメラロールに保存するために使用します。</string>
+	<string>Filmers needs access to save edited videos to your Photo Library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Filmers needs access to your Photo Library to view your recorded videos.</string>
 </dict>
 </plist>

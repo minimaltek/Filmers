@@ -135,6 +135,9 @@ final class PlaybackController: ObservableObject {
     var totalDuration: Double = 0
     /// 次セグメントの事前seek済み情報（device, segmentID）
     private var preloadedNext: (device: String, segID: UUID)? = nil
+    /// セグメントシーク完了キャッシュ: デバイス → (segmentID, シーク先 sourceInTime)
+    /// 2回目以降の同セグメント遷移でシークをスキップして即 play() するために使う
+    private var seekCache: [String: (segID: UUID, sourceInTime: Double)] = [:]
 
     /// 再生スピード倍率（1.0 = 通常速度）
     var playbackRate: Float = 1.0
@@ -234,7 +237,14 @@ final class PlaybackController: ObservableObject {
     }
 
     func setup(videos: [String: URL]) {
-        players = videos.mapValues { AVPlayer(url: $0) }
+        players = videos.mapValues {
+            let player = AVPlayer(url: $0)
+            // ローカルファイル再生でも十分な先読みバッファを確保してシーク後のスタッターを抑制
+            player.currentItem?.preferredForwardBufferDuration = 5.0
+            player.automaticallyWaitsToMinimizeStalling = false
+            return player
+        }
+        seekCache.removeAll()
         metalRenderer.filterParamsHolder = filterParamsHolder
         metalRenderer.setup(players: players)
     }
@@ -244,9 +254,15 @@ final class PlaybackController: ObservableObject {
         player?.rate = playbackRate
     }
 
+    /// 特定デバイスのシークキャッシュを無効化する（トリム変更後などに呼ぶ）
+    func invalidateSeekCache(for device: String) {
+        seekCache.removeValue(forKey: device)
+    }
+
     func teardown() {
         seekGeneration += 1   // 残留シークコールバックを無効化
         preloadedNext = nil
+        seekCache.removeAll()
         players.values.forEach { $0.pause() }
         stopPitchEngine()
         stopAutoRotation()
@@ -1137,11 +1153,25 @@ final class PlaybackController: ObservableObject {
            preloaded.device == device,
            preloaded.segID == seg.id {
             preloadedNext = nil
+            seekCache[device] = (segID: seg.id, sourceInTime: seg.sourceInTime)
             isSeeking = false
             if isPlaying { playAtRate(player) }
             return
         }
         preloadedNext = nil
+
+        // シークキャッシュヒット: 同セグメントを既にシーク済みでプレイヤー位置が一致 → 即再生
+        // （2回目以降のループや編集後の再再生でシーク待ちなしに遷移できる）
+        if let cached = seekCache[device],
+           cached.segID == seg.id,
+           let p = player {
+            let now = CMTimeGetSeconds(p.currentTime())
+            if abs(now - seg.sourceInTime) <= 0.1 {
+                isSeeking = false
+                if isPlaying { playAtRate(player) }
+                return
+            }
+        }
 
         isSeeking = true
         seekGeneration += 1
@@ -1155,6 +1185,8 @@ final class PlaybackController: ObservableObject {
             guard finished else { return }
             Task { @MainActor [weak self] in
                 guard let self, self.seekGeneration == generation else { return }
+                // シーク完了位置をキャッシュに記録
+                self.seekCache[device] = (segID: seg.id, sourceInTime: seg.sourceInTime)
                 self.isSeeking = false
                 if self.isPlaying { self.playAtRate(player) }
             }
@@ -1373,9 +1405,10 @@ final class PlaybackController: ObservableObject {
         let now = CMTimeGetSeconds(player.currentTime())
 
         // 再生中のセグメントを特定
+        // NOTE: toleranceBefore in seekToSegment is twoFrames (≈0.067s), so allow 0.1s before sourceInTime
         guard let currentEntry = allSegments.first(where: {
             $0.device == activePreviewDevice &&
-            now >= $0.seg.sourceInTime - 0.05 &&
+            now >= $0.seg.sourceInTime - 0.1 &&
             now < $0.seg.sourceOutTime
         }) else {
             // セグメントが見つからない → 次セグメントへ / 黒画面 / 終了
@@ -1403,30 +1436,39 @@ final class PlaybackController: ObservableObject {
         }
 
         // プレイヘッドをタイムライン時間に変換（後退しない）
-        let newPlayhead = currentEntry.seg.trimIn + (now - currentEntry.seg.sourceInTime)
+        // now がシーク誤差で sourceInTime より早い場合は trimIn にクランプ
+        let rawPlayhead = currentEntry.seg.trimIn + (now - currentEntry.seg.sourceInTime)
+        let newPlayhead = max(currentEntry.seg.trimIn, rawPlayhead)
         playheadTime = max(playheadTime - 0.1, newPlayhead)
 
         // 次セグメントへの事前seek（終端0.5秒前に発行）
+        // 同デバイスの次セグメントは現在再生中のプレイヤーをシークするため事前seekをスキップ
         let preloadThreshold = 0.5
         let frameTime = 1.0 / 30.0
         if now >= currentEntry.seg.sourceOutTime - preloadThreshold,
            now < currentEntry.seg.sourceOutTime - frameTime,
            preloadedNext == nil {
             if let next = allSegments.first(where: { $0.seg.trimIn > currentEntry.seg.trimIn }),
-               next.device != activePreviewDevice || next.seg.id != currentEntry.seg.id {
+               next.device != activePreviewDevice {
                 // 音声ソースデバイスはシークしない（連続再生を途切れさせないため）
                 if next.device == audioSourceDevice {
                     preloadedNext = (next.device, next.seg.id)
                 } else {
                     let nextPlayer = players[next.device]
                     let twoFrames = CMTimeMakeWithSeconds(2.0 / 30.0, preferredTimescale: 600)
+                    let nextDevice = next.device
+                    let nextSegID = next.seg.id
+                    let nextSourceIn = next.seg.sourceInTime
                     nextPlayer?.seek(
-                        to: CMTimeMakeWithSeconds(next.seg.sourceInTime, preferredTimescale: 600),
+                        to: CMTimeMakeWithSeconds(nextSourceIn, preferredTimescale: 600),
                         toleranceBefore: twoFrames, toleranceAfter: .zero
                     ) { [weak self] finished in
                         guard finished else { return }
                         Task { @MainActor [weak self] in
-                            self?.preloadedNext = (next.device, next.seg.id)
+                            guard let self else { return }
+                            // プリロード完了をキャッシュに記録（次の seekToSegment でシークをスキップできる）
+                            self.seekCache[nextDevice] = (segID: nextSegID, sourceInTime: nextSourceIn)
+                            self.preloadedNext = (nextDevice, nextSegID)
                         }
                     }
                 }
@@ -2713,6 +2755,8 @@ struct PreviewView: View {
                 // スロットルをリセット（直前の onTrimIn/onTrimOut で最終値が確実に反映されるように）
                 lastTrimUpdateTime = 0
                 playback.isTrimming = false
+                // トリム変更でセグメント境界が変わるためシークキャッシュを無効化
+                playback.invalidateSeekCache(for: device)
                 playback.seekPreview(to: playback.playheadTime, timeline: timeline, selectedDevice: selectedDevice)
             }
         )

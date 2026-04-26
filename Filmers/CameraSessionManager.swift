@@ -12,7 +12,7 @@ import Combine
 class CameraSessionManager: NSObject, ObservableObject {
     // MARK: - Properties
     
-    private let serviceType = "douki-sync"
+    private let serviceType = "filmers-sync"
     private var myPeerID: MCPeerID
     private let myDisplayName: String
     
@@ -43,7 +43,7 @@ class CameraSessionManager: NSObject, ObservableObject {
     //   専用のシリアルキューで保護する
     // value = CONNECTING 状態になった時刻（stale 判定用）
     private var _connectingPeerNames: [String: Date] = [:]
-    private let connectingLock = DispatchQueue(label: "douki.connectingLock")
+    private let connectingLock = DispatchQueue(label: "filmers.connectingLock")
     
     /// CONNECTING のstale判定しきい値（Hang環境では10秒以上CONNECTINGが続くことがある）
     private let connectingStaleThreshold: TimeInterval = 15.0
@@ -217,7 +217,7 @@ class CameraSessionManager: NSObject, ObservableObject {
     
     override init() {
         // UserDefaults に保存されたユーザー名を使用。未設定ならデバイス名にフォールバック。
-        let savedName = UserDefaults.standard.string(forKey: "douki.userName")?.trimmingCharacters(in: .whitespaces)
+        let savedName = UserDefaults.standard.string(forKey: "filmers.userName")?.trimmingCharacters(in: .whitespaces)
         let displayName = (savedName?.isEmpty == false) ? savedName! : UIDevice.current.name
         self.myDisplayName = displayName
         self.myPeerID = MCPeerID(displayName: displayName)
@@ -411,8 +411,8 @@ class CameraSessionManager: NSObject, ObservableObject {
                 || (cameraManager?.isCameraSessionRunning == true)
 
             if persistentRole {
-                // ★ 永続モード: カメラは停止せず維持（再起動のオーバーヘッドを避ける）
-                // マルチモニターのみ停止
+                // ★ 永続モード: カメラセッション自体は維持するが、isCameraReady を落として接続画面に戻す
+                // 再接続後にマスターが start_camera を送り直すことでカメラ画面に復帰する
                 if isMultiMonitorActive {
                     isMultiMonitorActive = false
                     snapshotTimer?.invalidate()
@@ -420,12 +420,24 @@ class CameraSessionManager: NSObject, ObservableObject {
                     peerSnapshots.removeAll()
                     cameraManager?.isSnapshotEnabled = false
                 }
-                connectionState = .connecting
                 if cameraIsRunning {
-                    addLog("Persistent mode – camera kept running, will retry (master=\(persistentMasterName ?? "nil"))")
+                    // まだ接続中のピアに stop_camera を通知（画面を揃える）
+                    if !connectedPeers.isEmpty {
+                        let cmd: [String: Any] = ["action": "stop_camera"]
+                        for peer in connectedPeers {
+                            sendCommandTo(peer, command: cmd)
+                        }
+                        addLog("Persistent mode – sent stop_camera to remaining peers")
+                    }
+                    // 自分も接続画面に戻る（カメラセッションは維持）
+                    isCameraReady = false
+                    OrientationLock.isCameraActive = false
+                    enableIdleTimer()
+                    addLog("Persistent mode – camera session kept, isCameraReady reset, will retry (master=\(persistentMasterName ?? "nil"))")
                 } else {
                     addLog("Persistent mode – will retry (master=\(persistentMasterName ?? "nil"))")
                 }
+                connectionState = .connecting
             } else {
                 // 非永続モード: カメラを停止
                 if cameraIsRunning {
@@ -1492,8 +1504,11 @@ class CameraSessionManager: NSObject, ObservableObject {
                 // スレーブ: マスターからのカメラ停止コマンドを受信
                 self.addLog("stop_camera received from \(peer.displayName)")
                 OrientationLock.isCameraActive = false  // 画面回転制限を解除
-                self.cameraManager?.stopSession()
                 self.isCameraReady = false
+                // 永続モードではカメラセッション自体は維持（再接続後の再起動コスト削減）
+                if !self.persistentRole {
+                    self.cameraManager?.stopSession()
+                }
                 
             case "start_multi_monitor":
                 // スレーブ: マルチモニター開始
@@ -1567,11 +1582,8 @@ class CameraSessionManager: NSObject, ObservableObject {
 
         addLog("Starting camera for slave...")
 
-        // カメラをセットアップして、完了後にcamera_readyを送信
-        cameraManager?.setupCamera()
-
-        // カメラが完全に起動するまで少し待つ
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        // カメラをセットアップして、session.isRunning 確定後にcamera_readyを送信
+        cameraManager?.setupCamera { [weak self] in
             guard let self else { return }
             self.isCameraReady = true
 
@@ -1961,9 +1973,10 @@ extension CameraSessionManager: MCSessionDelegate {
                     }
                 }
                 
-                // ★ 永続モード: マスターが既にカメラ起動済みなら、再接続したスレーブに start_camera を送る
+                // ★ 永続モード: カメラセッションが動いていれば、再接続したスレーブに start_camera を送る
+                // isCameraReady は切断時に false にリセットされるため、セッション実行状態で判定する
                 // 3.0秒待ってMCSessionチャンネルが安定してから送信
-                if self.persistentRole && self.isMaster && self.isCameraReady {
+                if self.persistentRole && self.isMaster && (self.cameraManager?.isCameraSessionRunning == true) {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
                         guard let self,
                               self.connectedPeers.contains(where: { $0.displayName == peerName }) else { return }

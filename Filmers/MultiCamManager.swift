@@ -38,7 +38,7 @@ class MultiCamManager: NSObject, ObservableObject {
     
     // MARK: - Internal State
     private var multiCamSession: AVCaptureMultiCamSession?
-    private let sessionQueue = DispatchQueue(label: "com.douki.multiCamSession", qos: .default)
+    private let sessionQueue = DispatchQueue(label: "com.filmers.multiCamSession", qos: .default)
     
     // Back camera pipeline
     private var backInput: AVCaptureDeviceInput?

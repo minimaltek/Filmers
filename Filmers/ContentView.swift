@@ -315,7 +315,7 @@ struct ContentView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .lastTextBaseline, spacing: 4) {
-                        (Text("DOUKI").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
+                        (Text("FILMERS").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
                             .font(.system(size: 32, weight: .black, design: .default))
                             .fontWidth(.compressed)
                             .tracking(-0.5)
@@ -493,7 +493,7 @@ struct ContentView: View {
                 // ノードリスト
                 VStack(spacing: 1) {
                     // 自分
-                    let myName = UserDefaults.standard.string(forKey: "douki.userName")
+                    let myName = UserDefaults.standard.string(forKey: "filmers.userName")
                         .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                         ?? UIDevice.current.name
                     let selfIsMaster = sessionManager.isMaster
@@ -575,27 +575,29 @@ struct ContentView: View {
             
             // ── SINGLE MODE + REBUILD SESSION（接続がない時に表示） ──
             if sessionManager.connectedPeers.isEmpty {
-                // SINGLE MODE
-                Button(action: {
-                    enterSingleMode()
-                }) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "camera.on.rectangle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("SINGLE MODE")
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .tracking(2)
+                // SINGLE MODE（MultiCam非対応機種では非表示）
+                if MultiCamManager.isMultiCamSupported {
+                    Button(action: {
+                        enterSingleMode()
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "camera.on.rectangle.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("SINGLE MODE")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .tracking(2)
+                        }
+                        .foregroundColor(.orange.opacity(0.7))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+                        )
                     }
-                    .foregroundColor(.orange.opacity(0.7))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.orange.opacity(0.2), lineWidth: 1)
-                    )
-                }
-                .padding(.horizontal, 40)
-                .padding(.bottom, 12)
+                    .padding(.horizontal, 40)
+                    .padding(.bottom, 12)
+                } // if isMultiCamSupported
                 
                 // REBUILD SESSION
                 Button(action: {
@@ -852,7 +854,7 @@ struct ContentView: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .lastTextBaseline, spacing: 4) {
-                                (Text("DOUKI").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
+                                (Text("FILMERS").foregroundColor(.white) + Text(".").foregroundColor(logoDotWhite))
                                     .font(.system(size: 32, weight: .black, design: .default))
                                     .fontWidth(.compressed)
                                     .tracking(-0.5)
@@ -918,7 +920,7 @@ struct ContentView: View {
                         .padding(.bottom, 10)
                         
                         VStack(spacing: 1) {
-                            let myName = UserDefaults.standard.string(forKey: "douki.userName")
+                            let myName = UserDefaults.standard.string(forKey: "filmers.userName")
                                 .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                                 ?? UIDevice.current.name
                             let selfIsMaster = sessionManager.isMaster
@@ -1146,14 +1148,6 @@ struct ContentView: View {
                             .foregroundColor(.gray.opacity(0.5))
                     }
                     .frame(width: 150, height: 150)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(Color.white.opacity(0.03))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 18)
-                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                            )
-                    )
                 } else if !hasPeers && sessionManager.isRetrying {
                     // RECONNECTING状態（リトライ中でピアなし）
                     VStack(spacing: 10) {
@@ -1170,14 +1164,6 @@ struct ContentView: View {
                             .foregroundColor(.orange.opacity(0.5))
                     }
                     .frame(width: 150, height: 150)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(Color.orange.opacity(0.05))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 18)
-                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                            )
-                    )
                 } else {
                     // START CAMERAボタン（赤）
                     Button(action: {
@@ -1252,20 +1238,6 @@ struct ContentView: View {
                         .foregroundColor(accentGreen.opacity(0.5))
                 }
                 .frame(width: 150, height: 150)
-                .background(
-                    RoundedRectangle(cornerRadius: 18)
-                        .fill(
-                            LinearGradient(
-                                colors: [accentGreen.opacity(0.1), accentGreen.opacity(0.03)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 18)
-                                .stroke(accentGreen.opacity(0.3), lineWidth: 1)
-                        )
-                )
             }
             
             // Session ID

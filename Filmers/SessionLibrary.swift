@@ -166,7 +166,7 @@ final class SessionLibrary: ObservableObject {
 
     @Published private(set) var records: [SessionRecord] = []
 
-    private let key = "douki.sessionLibrary"
+    private let key = "filmers.sessionLibrary"
 
     private init() { load() }
 

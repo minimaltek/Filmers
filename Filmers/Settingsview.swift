@@ -13,13 +13,13 @@ import StoreKit
 // MARK: - Purchase Manager
 
 /// 課金状態を管理するシングルトン（StoreKit 2 買い切り）
-/// Product ID: com.douki.app.pro
+/// Product ID: com.filmers.app.pro
 @MainActor
 class PurchaseManager: ObservableObject {
     static let shared = PurchaseManager()
 
     /// プロダクトID（App Store Connect で登録したIDに合わせること）
-    static let productID = "douki.premium"
+    static let productID = "filmers.premium"
 
     @Published private(set) var isPremium: Bool = false
     @Published private(set) var product: Product? = nil
@@ -100,7 +100,7 @@ class PurchaseManager: ObservableObject {
         }
         // デバッグ時は UserDefaults フォールバック
         #if DEBUG
-        if UserDefaults.standard.bool(forKey: "douki.isPremium") {
+        if UserDefaults.standard.bool(forKey: "filmers.isPremium") {
             isPremium = true
         }
         #endif
@@ -142,7 +142,7 @@ class PurchaseManager: ObservableObject {
     #if DEBUG
     func debugSetPremium(_ value: Bool) {
         isPremium = value
-        UserDefaults.standard.set(value, forKey: "douki.isPremium")
+        UserDefaults.standard.set(value, forKey: "filmers.isPremium")
     }
     #endif
 }
@@ -160,7 +160,7 @@ struct SettingsView: View {
     @State private var selectedCodec: VideoCodec = .hevc
 
     /// UserDefaults に永続化するユーザー名
-    @AppStorage("douki.userName") private var userName: String = UIDevice.current.name
+    @AppStorage("filmers.userName") private var userName: String = UIDevice.current.name
     /// 編集中の一時テキスト
     @State private var userNameDraft: String = ""
 

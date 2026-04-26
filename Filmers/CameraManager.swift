@@ -65,11 +65,11 @@ class CameraManager: NSObject, ObservableObject {
     
     // 録画設定（UserDefaults で永続化）
     @Published var desiredOrientation: VideoOrientation = .cinema {
-        didSet { UserDefaults.standard.set(desiredOrientation.rawValue, forKey: "douki.desiredOrientation") }
+        didSet { UserDefaults.standard.set(desiredOrientation.rawValue, forKey: "filmers.desiredOrientation") }
     }
     var videoOrientation: AVCaptureVideoOrientation = .landscapeRight  // デフォルト: 横向き
     @Published var videoCodec: AVVideoCodecType = .hevc {
-        didSet { UserDefaults.standard.set(VideoCodec.from(avCodec: videoCodec).rawValue, forKey: "douki.videoCodec") }
+        didSet { UserDefaults.standard.set(VideoCodec.from(avCodec: videoCodec).rawValue, forKey: "filmers.videoCodec") }
     }
     
     private var captureSession: AVCaptureSession?
@@ -87,7 +87,7 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: - Snapshot (Multi-Monitor)
     private var snapshotOutput: AVCaptureVideoDataOutput?
-    private let snapshotQueue = DispatchQueue(label: "com.douki.snapshot", qos: .utility)
+    private let snapshotQueue = DispatchQueue(label: "com.filmers.snapshot", qos: .utility)
     /// CIContext はコストが高いので使い回す
     private lazy var snapshotCIContext = CIContext(options: [.useSoftwareRenderer: false])
     /// 最新スナップショット（JPEG Data） — メインスレッドから読み書きする
@@ -102,7 +102,7 @@ class CameraManager: NSObject, ObservableObject {
     // AVCaptureSession 専用の直列キュー。
     // global(qos:) を使うと MCSession の内部処理と同じスレッドプールを奪い合い、
     // startRunning() の長時間ブロックが MCSession のタイムアウト切断を引き起こす。
-    private let sessionQueue = DispatchQueue(label: "com.douki.captureSession", qos: .default)
+    private let sessionQueue = DispatchQueue(label: "com.filmers.captureSession", qos: .default)
     
     // 録画開始時のタイムスタンプ（同期用）
     private var syncTimestamp: TimeInterval = 0
@@ -170,12 +170,12 @@ class CameraManager: NSObject, ObservableObject {
     override init() {
         super.init()
         // UserDefaults から保存済み設定を復元
-        if let orientationRaw = UserDefaults.standard.string(forKey: "douki.desiredOrientation"),
+        if let orientationRaw = UserDefaults.standard.string(forKey: "filmers.desiredOrientation"),
            let orientation = VideoOrientation(rawValue: orientationRaw) {
             desiredOrientation = orientation
             videoOrientation = orientation.avOrientation
         }
-        if let codecRaw = UserDefaults.standard.string(forKey: "douki.videoCodec"),
+        if let codecRaw = UserDefaults.standard.string(forKey: "filmers.videoCodec"),
            let codec = VideoCodec(rawValue: codecRaw) {
             videoCodec = codec.avCodec
         }
@@ -184,7 +184,8 @@ class CameraManager: NSObject, ObservableObject {
     // MARK: - Public Methods
     
     /// カメラのセットアップと起動
-    func setupCamera() {
+    /// - Parameter completion: セッションが isRunning になった後にメインスレッドで呼ばれる
+    func setupCamera(completion: (() -> Void)? = nil) {
         #if DEBUG
         print("🎥 [CameraManager] setupCamera() called")
         #endif
@@ -193,6 +194,7 @@ class CameraManager: NSObject, ObservableObject {
             #if DEBUG
             print("🧪 [CameraManager] Running in Preview – skipping camera setup")
             #endif
+            completion?()
             return
         }
         // 既にセッションが起動済みならスキップ（2重セットアップ防止）
@@ -200,6 +202,7 @@ class CameraManager: NSObject, ObservableObject {
             #if DEBUG
             print("⚠️ [CameraManager] Session already running – skipping setup")
             #endif
+            completion?()
             return
         }
         checkCameraPermission { [weak self] granted in
@@ -207,8 +210,8 @@ class CameraManager: NSObject, ObservableObject {
             print("🎥 [CameraManager] Permission granted: \(granted)")
             #endif
             if granted {
-                // カメラを設定して起動する
-                self?.configureCaptureSession(thenStart: true)
+                // カメラを設定して起動する（完了後にコールバック）
+                self?.configureCaptureSession(thenStart: true, completion: completion)
             } else {
                 self?.error = "Camera access is not permitted"
                 #if DEBUG

@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		E2D982E22F601925007F02CE /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = E2D982E12F601925007F02CE /* Lottie */; };
 		E2D982EE2F60CC74007F02CE /* MetalPreviewRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2D982ED2F60CC74007F02CE /* MetalPreviewRenderer.swift */; };
 /* End PBXBuildFile section */
 
@@ -47,7 +46,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E2D982E22F601925007F02CE /* Lottie in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -93,7 +91,6 @@
 			);
 			name = Filmers;
 			packageProductDependencies = (
-				E2D982E12F601925007F02CE /* Lottie */,
 			);
 			productName = Filmers;
 			productReference = E28EADA92F42E8E1007131DF /* Filmers.app */;
@@ -285,16 +282,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4YRYH5BD9B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Filmers/Info.plist;
-				INFOPLIST_KEY_NSCameraUsageDescription = "動画を撮影するためにカメラを使用します";
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "他のデバイスと同期するためにローカルネットワークを使用します";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声を録音するためにマイクを使用します";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "撮影した動画をカメラロールに保存します";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "撮影した動画をカメラロールから確認するために使用します";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -305,7 +297,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.42;
+				MARKETING_VERSION = 0.43;
 				PRODUCT_BUNDLE_IDENTIFIER = com.cycle2012.Filmers;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -324,16 +316,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4YRYH5BD9B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Filmers/Info.plist;
-				INFOPLIST_KEY_NSCameraUsageDescription = "動画を撮影するためにカメラを使用します";
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "他のデバイスと同期するためにローカルネットワークを使用します";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声を録音するためにマイクを使用します";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "撮影した動画をカメラロールに保存します";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "撮影した動画をカメラロールから確認するために使用します";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -344,7 +331,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.42;
+				MARKETING_VERSION = 0.43;
 				PRODUCT_BUNDLE_IDENTIFIER = com.cycle2012.Filmers;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -390,14 +377,6 @@
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		E2D982E12F601925007F02CE /* Lottie */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = E2D982E02F601925007F02CE /* XCRemoteSwiftPackageReference "lottie-ios" */;
-			productName = Lottie;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = E28EADA12F42E8E1007131DF /* Project object */;
 }
