@@ -184,13 +184,16 @@ class MultiCamManager: NSObject, ObservableObject {
             session.beginConfiguration()
             
             // ── Back Camera（端末で最も広角の物理カメラを選択） ──
-            let backCamera: AVCaptureDevice = {
+            guard let backCamera: AVCaptureDevice = {
                 // ultra-wide 優先、なければ wide-angle
                 if let uw = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
                     return uw
                 }
-                return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)!
-            }()
+                return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            }() else {
+                self.failSetup(session: session, message: "No back camera available")
+                return
+            }
             guard let backIn = try? AVCaptureDeviceInput(device: backCamera) else {
                 self.failSetup(session: session, message: "Cannot create back camera input")
                 return

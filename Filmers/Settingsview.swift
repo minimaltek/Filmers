@@ -13,7 +13,7 @@ import StoreKit
 // MARK: - Purchase Manager
 
 /// 課金状態を管理するシングルトン（StoreKit 2 買い切り）
-/// Product ID: com.filmers.app.pro
+/// Product ID: filmers.premium
 @MainActor
 class PurchaseManager: ObservableObject {
     static let shared = PurchaseManager()

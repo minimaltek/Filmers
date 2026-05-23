@@ -39,7 +39,20 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         DispatchQueue.main.async {
             OrientationLock.notifyOrientationChange()
         }
+
+        // NTP時刻同期を開始（デバイス間の正確な同期のため）
+        Task { @MainActor in
+            NTPSyncManager.shared.startSync()
+        }
+
         return true
+    }
+
+    func applicationWillEnterForeground(_ application: UIApplication) {
+        // フォアグラウンド復帰時にNTP再同期
+        Task { @MainActor in
+            NTPSyncManager.shared.resync()
+        }
     }
     
     func application(

@@ -1693,6 +1693,12 @@ struct PreviewView: View {
         ("−2 OCT",  -2400),
     ]
 
+    // MARK: - Help Guide
+    /// ヘルプガイド表示フラグ
+    @State private var showHelpGuide: Bool = false
+    /// 初回起動済みフラグ（UserDefaults に永続化）
+    @AppStorage("editWindowHelpShownV1") private var helpShownOnce: Bool = false
+
     // MARK: - Timeline Zoom
     /// タイムラインのズーム倍率（1.0 = 全体表示、最大 8.0）
     @State private var zoomScale: CGFloat = 1.0
@@ -1883,6 +1889,12 @@ struct PreviewView: View {
                         .font(.system(size: 15, weight: .medium, design: .monospaced))
                         .foregroundColor(.white.opacity(0.9))
                 }
+            }
+        }
+        .overlay {
+            // ヘルプガイドオーバーレイ
+            if showHelpGuide {
+                helpGuideOverlay
             }
         }
         .onAppear {
@@ -2084,6 +2096,95 @@ struct PreviewView: View {
             .padding(6)
             .allowsHitTesting(false)
         }
+    }
+
+    // MARK: - Help Guide Overlay
+
+    /// 操作ガイドオーバーレイ（タイムライン上に直接表示）
+    private var helpGuideOverlay: some View {
+        GeometryReader { geo in
+            let safeTop = windowSafeAreaTop
+            let screenW = geo.size.width
+            let screenH = geo.size.height
+
+            // レイアウト計算（body と同じ）
+            let headerH: CGFloat = 44
+            let bottomH = screenH * 0.50
+            let previewH = screenH - safeTop - headerH - bottomH
+
+            // ヘッダーボタンの位置（右端から計算）
+            // 順序: Edit → Delete → Guide → Export
+            // 32px buttons, 6px spacing, 20px padding
+            let exportX = screenW - 36
+            let guideX = exportX - 38  // Guide（ヒント不要）
+            let trashX = guideX - 38   // Delete
+            let pencilX = trashX - 38  // Edit
+            // ボタンの中央Y（ヘッダー中央）
+            let headerBtnY = safeTop + headerH / 2
+
+            // タイムラインエリアの位置
+            let timelineTop = safeTop + headerH + previewH
+            let timelineH = bottomH - 80
+
+            // 再生コントロールの位置
+            // 5つのボタンが等間隔: screenW / 5 = 1区画の幅
+            // 各ボタンの中央X = (index + 0.5) * (screenW / 5)
+            let controlBtnY = screenH - 44  // play button center (56pt button, 16pt bottom padding)
+            let soundX = screenW * 0.1      // headphones: 1番目
+            let effectX = screenW * 0.9     // camera.filters: 5番目
+
+            ZStack {
+                // 半透明背景（タップで閉じる）
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showHelpGuide = false
+                    }
+
+                // ── ヘッダーボタンのヒント（ボタンの下にラベル）──
+                helpCaption("Edit")
+                    .position(x: pencilX, y: headerBtnY + 36)
+
+                if onDeleteSession != nil {
+                    helpCaption("Delete")
+                        .position(x: trashX, y: headerBtnY + 36)
+                }
+
+                helpCaption("Export")
+                    .position(x: exportX, y: headerBtnY + 36)
+
+                // ── タイムラインエリアのヒント ──
+                helpCaption("Long Press: Make Trim Range")
+                    .position(x: screenW / 2, y: timelineTop + timelineH * 0.35)
+
+                // Swipe/Pinch: タイム表示のすぐ上
+                VStack(spacing: 2) {
+                    helpCaption("Swipe: Move")
+                    helpCaption("Pinch: Zoom")
+                }
+                .position(x: screenW / 2, y: controlBtnY - 125)
+
+                // ── 再生コントロールのヒント（ボタンの上にラベル）──
+                helpCaption("Sound")
+                    .position(x: soundX, y: controlBtnY - 58)
+
+                helpCaption("Effect")
+                    .position(x: effectX, y: controlBtnY - 58)
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    /// ヘルプキャプションのスタイル（Settings画面と同じシステムフォント）
+    private func helpCaption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(.black)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.yellow)
+            .cornerRadius(4)
     }
 
     /// MIRRORフィルタの種類に応じたオーバーレイ形状
@@ -2428,17 +2529,17 @@ struct PreviewView: View {
 
             Spacer()
 
-            // ── 右：ペン（タイトル編集）+ ライブラリ + 書き出しボタン ──
-            HStack(spacing: 10) {
+            // ── 右：Edit → Delete → Guide → Export ──
+            HStack(spacing: 6) {
                 // タイトル編集ボタン（ペンアイコン）
                 Button {
                     titleDraft = currentTitle == "UNTITLED" ? "" : currentTitle
                     isEditingTitle = true
                 } label: {
                     Image(systemName: "pencil")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(.white)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 32, height: 32)
                         .background(Color.white.opacity(0.15))
                         .clipShape(Circle())
                 }
@@ -2447,12 +2548,24 @@ struct PreviewView: View {
                 if onDeleteSession != nil {
                     Button(action: { showDeleteSessionConfirm = true }) {
                         Image(systemName: "trash")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 32, height: 32)
                             .background(Color.white.opacity(0.15))
                             .clipShape(Circle())
                     }
+                }
+
+                // ヘルプボタン
+                Button {
+                    showHelpGuide = true
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.6))
+                        .frame(width: 32, height: 32)
+                        .background(Color.white.opacity(0.1))
+                        .clipShape(Circle())
                 }
 
                 // 書き出しボタン
@@ -2461,9 +2574,9 @@ struct PreviewView: View {
                     Task { await exportEngine.export(timeline: timeline, videos: videos, orientation: desiredOrientation, audioSource: exportAudioSource, videoFilter: selectedFilter, showWatermark: !purchaseManager.isPremium, pitchCents: pitchShiftCents, kaleidoscopeType: selectedKaleidoscope, kaleidoscopeSize: kaleidoscopeSize, kaleidoscopeCenterX: kaleidoscopeCenterX, kaleidoscopeCenterY: kaleidoscopeCenterY, tileHeight: tileHeight, mirrorDirection: mirrorDirection, rotationAngle: rotationAngle, filterIntensity: filterIntensity, segmentFilterSettings: segmentFilterSettings, speedRate: playbackSpeed, noSoundExport: audioSource == "NO_SOUND") }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.black)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 32, height: 32)
                         .background(Color.white)
                         .clipShape(Circle())
                 }
@@ -4486,7 +4599,25 @@ struct PreviewView: View {
         await playback.metalRenderer.warmUpPipeline()
 
         // ウォームアップ完了 → Loading 解除
-        await MainActor.run { isReady = true }
+        await MainActor.run {
+            isReady = true
+
+            // 初回起動時: 最初のトラックに初期トリム範囲を自動作成（保存済み編集がない場合のみ）
+            if savedEditState.isEmpty, let firstDevice = sortedDevices.first {
+                let initialSpanSeconds: Double = 2.0
+                let centerTime = initialSpanSeconds / 2
+                timeline.addSegment(around: centerTime, for: firstDevice, spanPixels: 100, trackWidth: baseTrackWidth)
+            }
+
+            // 初回起動時: ヘルプガイドを自動表示
+            if !helpShownOnce {
+                // 少し遅延させてUIが落ち着いてから表示
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    showHelpGuide = true
+                    helpShownOnce = true
+                }
+            }
+        }
 
         // 波形データはUIが表示された後にバックグラウンドで取得
         Task { await generateAllWaveforms() }
@@ -5092,6 +5223,34 @@ private extension Comparable {
 }
 
 // MARK: - Canvas Preview
+
+// MARK: - Help Guide Row
+
+struct HelpGuideRow: View {
+    let icon: String
+    let title: String
+    let description: String
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 24))
+                .foregroundColor(.yellow)
+                .frame(width: 36)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.white)
+                Text(description)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.7))
+            }
+
+            Spacer()
+        }
+    }
+}
 
 #if DEBUG
 #Preview("Cinema 2.39:1 - 2 devices") {

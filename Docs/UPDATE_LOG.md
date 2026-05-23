@@ -55,7 +55,7 @@
 - **開発用トグル**: Settings 画面に `#if DEBUG` Premium Mode トグル追加
 
 ### 変更ファイル
-- `Previewview .swift` — タイムライン操作改善、レイアウト、透かし連携
+- `PreviewView.swift` — タイムライン操作改善、レイアウト、透かし連携
 - `CameraSessionManager.swift` — MC 安定化（軽量リスタート、stale peer 処理、passive timeout）
 - `DoukiExportEngine.swift` — 透かし描画実装
 - `Settingsview.swift` — PurchaseManager、DEBUG トグル
@@ -101,7 +101,7 @@
 - `ContentView.swift` — START CAMERA/AWAITING UI重複解消
 - `CameraOverlayControls.swift` — レンズセレクター修正、UI配置変更、解像度バッジ削除
 - `DoukiExclusiveEditTimeline.swift` — enforceExclusivity に priorityDevice 追加
-- `Previewview .swift` — ジェスチャー競合修正、再生ヘッド修正、トリムハンドル改善
+- `PreviewView.swift` — ジェスチャー競合修正、再生ヘッド修正、トリムハンドル改善
 - `LibraryView.swift` — サムネイル、Select モード、UI整理
 - `CameraManager.swift` — orientation ヘルパー追加
 - `CameraSessionManager.swift` — カメラ起動タイミング制御

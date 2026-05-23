@@ -151,10 +151,11 @@ struct SessionRecord: Identifiable, Codable, Equatable {
         kaleidoscopeCenterY = try? c.decode(Float.self, forKey: .kaleidoscopeCenterY)
         tileHeight = try? c.decode(Float.self, forKey: .tileHeight)
         playbackSpeed = try? c.decode(Float.self, forKey: .playbackSpeed)
+        filterIntensity = try? c.decode(Float.self, forKey: .filterIntensity)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, createdAt, videoPaths, editState, desiredOrientation, lockedDevices, selectedAudioDevice, selectedVideoFilter, pitchShiftCents, selectedKaleidoscope, kaleidoscopeSize, kaleidoscopeCenterX, kaleidoscopeCenterY, tileHeight, playbackSpeed
+        case id, title, createdAt, videoPaths, editState, desiredOrientation, lockedDevices, selectedAudioDevice, selectedVideoFilter, pitchShiftCents, selectedKaleidoscope, kaleidoscopeSize, kaleidoscopeCenterX, kaleidoscopeCenterY, tileHeight, playbackSpeed, filterIntensity
     }
 }
 
